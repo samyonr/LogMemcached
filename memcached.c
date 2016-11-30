@@ -100,7 +100,6 @@ static void process_command(conn *c, char *command);
 static void write_and_free(conn *c, char *buf, int bytes);
 static int ensure_iov_space(conn *c);
 static int add_iov(conn *c, const void *buf, int len);
-static int add_chunked_item_iovs(conn *c, item *it, int len);
 static int add_msghdr(conn *c);
 static void write_bin_error(conn *c, protocol_binary_response_status err,
                             const char *errstr, int swallow);
@@ -892,20 +891,6 @@ static int add_iov(conn *c, const void *buf, int len) {
     return 0;
 }
 
-static int add_chunked_item_iovs(conn *c, item *it, int len) {
-    assert(it->it_flags & ITEM_CHUNKED);
-    item_chunk *ch = (item_chunk *) ITEM_data(it);
-    while (ch) {
-        int todo = (len > ch->used) ? ch->used : len;
-        if (add_iov(c, ch->data, todo) != 0) {
-            return -1;
-        }
-        ch = ch->next;
-        len -= todo;
-    }
-    return 0;
-}
-
 /*
  * Constructs a set of UDP headers and attaches them to the outgoing messages.
  */
@@ -1026,33 +1011,9 @@ static void complete_nread_ascii(conn *c) {
     c->thread->stats.slab_stats[ITEM_clsid(it)].set_cmds++;
     pthread_mutex_unlock(&c->thread->stats.mutex);
 
-    if ((it->it_flags & ITEM_CHUNKED) == 0) {
-        if (strncmp(ITEM_data(it) + it->nbytes - 2, "\r\n", 2) == 0) {
-            is_valid = true;
-        }
-    } else {
-        char buf[2];
-        /* should point to the final item chunk */
-        item_chunk *ch = (item_chunk *) c->ritem;
-        assert(ch->used != 0);
-        /* :( We need to look at the last two bytes. This could span two
-         * chunks.
-         */
-        if (ch->used > 1) {
-            buf[0] = ch->data[ch->used - 2];
-            buf[1] = ch->data[ch->used - 1];
-        } else {
-            assert(ch->prev);
-            assert(ch->used == 1);
-            buf[0] = ch->prev->data[ch->prev->used - 1];
-            buf[1] = ch->data[ch->used - 1];
-        }
-        if (strncmp(buf, "\r\n", 2) == 0) {
-            is_valid = true;
-        } else {
-            assert(1 == 0);
-        }
-    }
+	if (strncmp(ITEM_data(it) + it->nbytes - 2, "\r\n", 2) == 0) {
+		is_valid = true;
+	}
 
     if (!is_valid) {
         out_string(c, "CLIENT_ERROR bad data chunk");
@@ -1366,26 +1327,8 @@ static void complete_update_bin(conn *c) {
 
     /* We don't actually receive the trailing two characters in the bin
      * protocol, so we're going to just set them here */
-    if ((it->it_flags & ITEM_CHUNKED) == 0) {
-        *(ITEM_data(it) + it->nbytes - 2) = '\r';
-        *(ITEM_data(it) + it->nbytes - 1) = '\n';
-    } else {
-        assert(c->ritem);
-        item_chunk *ch = (item_chunk *) c->ritem;
-        if (ch->size == ch->used)
-            ch = ch->next;
-        if (ch->size - ch->used > 1) {
-            ch->data[ch->used + 1] = '\r';
-            ch->data[ch->used + 2] = '\n';
-            ch->used += 2;
-        } else {
-            ch->data[ch->used + 1] = '\r';
-            ch->next->data[0] = '\n';
-            ch->used++;
-            ch->next->used++;
-            assert(ch->size == ch->used);
-        }
-    }
+	*(ITEM_data(it) + it->nbytes - 2) = '\r';
+	*(ITEM_data(it) + it->nbytes - 1) = '\n';
 
     ret = store_item(it, c->cmd, c);
 
@@ -1515,11 +1458,7 @@ static void process_bin_get_or_touch(conn *c) {
 
         if (should_return_value) {
             /* Add the data minus the CRLF */
-            if ((it->it_flags & ITEM_CHUNKED) == 0) {
-                add_iov(c, ITEM_data(it), it->nbytes - 2);
-            } else {
-                add_chunked_item_iovs(c, it, it->nbytes - 2);
-            }
+            add_iov(c, ITEM_data(it), it->nbytes - 2);
         }
 
         conn_set_state(c, conn_mwrite);
@@ -1881,7 +1820,7 @@ static void process_bin_sasl_auth(conn *c) {
     item *it = item_alloc(key, nkey, 0, 0, vlen);
 
     /* Can't use a chunked item for SASL authentication. */
-    if (it == 0 || (it->it_flags & ITEM_CHUNKED)) {
+    if (it == 0) {
         write_bin_error(c, PROTOCOL_BINARY_RESPONSE_ENOMEM, NULL, vlen);
         c->write_and_go = conn_swallow;
         return;
@@ -2485,80 +2424,14 @@ static void complete_nread(conn *c) {
     }
 }
 
-/* Destination must always be chunked */
-/* This should be part of item.c */
-static void _store_item_copy_chunks(item *d_it, item *s_it, const int len) {
-    item_chunk *dch = (item_chunk *) ITEM_data(d_it);
-    /* Advance dch until we find free space */
-    while (dch->size == dch->used) {
-        dch = dch->next;
-    }
-
-    if (s_it->it_flags & ITEM_CHUNKED) {
-        int remain = len;
-        item_chunk *sch = (item_chunk *) ITEM_data(s_it);
-        int copied = 0;
-        /* Fills dch's to capacity, not straight copy sch in case data is
-         * being added or removed (ie append/prepend)
-         */
-        while (sch && dch && remain) {
-            assert(dch->used <= dch->size);
-            int todo = (dch->size - dch->used < sch->used - copied)
-                ? dch->size - dch->used : sch->used - copied;
-            if (remain < todo)
-                todo = remain;
-            memcpy(dch->data + dch->used, sch->data + copied, todo);
-            dch->used += todo;
-            copied += todo;
-            remain -= todo;
-            assert(dch->used <= dch->size);
-            if (dch->size == dch->used) {
-                dch = dch->next;
-            }
-            assert(copied <= sch->used);
-            if (copied == sch->used) {
-                copied = 0;
-                sch = sch->next;
-            }
-        }
-        /* assert that the destination had enough space for the source */
-        assert(remain == 0);
-    } else {
-        int done = 0;
-        /* Fill dch's via a non-chunked item. */
-        while (len > done && dch) {
-            int todo = (dch->size - dch->used < len - done)
-                ? dch->size - dch->used : len - done;
-            assert(dch->size - dch->used != 0);
-            memcpy(dch->data + dch->used, ITEM_data(s_it) + done, todo);
-            done += todo;
-            dch->used += todo;
-            assert(dch->used <= dch->size);
-            if (dch->size == dch->used)
-                dch = dch->next;
-        }
-        assert(len == done);
-    }
-}
-
 static void _store_item_copy_data(int comm, item *old_it, item *new_it, item *add_it) {
     if (comm == NREAD_APPEND) {
-        if (new_it->it_flags & ITEM_CHUNKED) {
-            _store_item_copy_chunks(new_it, old_it, old_it->nbytes - 2);
-            _store_item_copy_chunks(new_it, add_it, add_it->nbytes);
-        } else {
-            memcpy(ITEM_data(new_it), ITEM_data(old_it), old_it->nbytes);
-            memcpy(ITEM_data(new_it) + old_it->nbytes - 2 /* CRLF */, ITEM_data(add_it), add_it->nbytes);
-        }
+		memcpy(ITEM_data(new_it), ITEM_data(old_it), old_it->nbytes);
+		memcpy(ITEM_data(new_it) + old_it->nbytes - 2 /* CRLF */, ITEM_data(add_it), add_it->nbytes);
     } else {
         /* NREAD_PREPEND */
-        if (new_it->it_flags & ITEM_CHUNKED) {
-            _store_item_copy_chunks(new_it, add_it, add_it->nbytes - 2);
-            _store_item_copy_chunks(new_it, old_it, old_it->nbytes);
-        } else {
-            memcpy(ITEM_data(new_it), ITEM_data(add_it), add_it->nbytes);
-            memcpy(ITEM_data(new_it) + add_it->nbytes - 2 /* CRLF */, ITEM_data(old_it), old_it->nbytes);
-        }
+        memcpy(ITEM_data(new_it), ITEM_data(add_it), add_it->nbytes);
+        memcpy(ITEM_data(new_it) + add_it->nbytes - 2 /* CRLF */, ITEM_data(old_it), old_it->nbytes);
     }
 }
 
@@ -3247,12 +3120,8 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens,
                           item_remove(it);
                           break;
                       }
-                  if ((it->it_flags & ITEM_CHUNKED) == 0) {
-                      add_iov(c, ITEM_data(it), it->nbytes);
-                  } else if (add_chunked_item_iovs(c, it, it->nbytes) != 0) {
-                      item_remove(it);
-                      break;
-                  }
+                  add_iov(c, ITEM_data(it), it->nbytes);
+
                 }
                 else
                 {
@@ -3264,18 +3133,11 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens,
                           item_remove(it);
                           break;
                       }
-                  if ((it->it_flags & ITEM_CHUNKED) == 0)
-                      {
-                          if (add_iov(c, ITEM_suffix(it), it->nsuffix + it->nbytes) != 0)
-                          {
-                              item_remove(it);
-                              break;
-                          }
-                      } else if (add_iov(c, ITEM_suffix(it), it->nsuffix) != 0 ||
-                                 add_chunked_item_iovs(c, it, it->nbytes) != 0) {
-                          item_remove(it);
-                          break;
-                      }
+				  if (add_iov(c, ITEM_suffix(it), it->nsuffix + it->nbytes) != 0)
+				  {
+					  item_remove(it);
+					  break;
+				  }
                 }
 
 
@@ -3557,7 +3419,7 @@ enum delta_result_type do_add_delta(conn *c, const char *key, const size_t nkey,
 
     /* Can't delta zero byte values. 2-byte are the "\r\n" */
     /* Also can't delta for chunked items. Too large to be a number */
-    if (it->nbytes <= 2 || (it->it_flags & ITEM_CHUNKED) != 0) {
+    if (it->nbytes <= 2) {
         return NON_NUMERIC;
     }
 
@@ -3708,26 +3570,6 @@ static void process_verbosity_command(conn *c, token_t *tokens, const size_t nto
     return;
 }
 
-static void process_slabs_automove_command(conn *c, token_t *tokens, const size_t ntokens) {
-    unsigned int level;
-
-    assert(c != NULL);
-
-    set_noreply_maybe(c, tokens, ntokens);
-
-    level = strtoul(tokens[2].value, NULL, 10);
-    if (level == 0) {
-        settings.slab_automove = 0;
-    } else if (level == 1 || level == 2) {
-        settings.slab_automove = level;
-    } else {
-        out_string(c, "ERROR");
-        return;
-    }
-    out_string(c, "OK");
-    return;
-}
-
 /* TODO: decide on syntax for sampling? */
 static void process_watch_command(conn *c, token_t *tokens, const size_t ntokens) {
     uint16_t f = 0;
@@ -3780,15 +3622,7 @@ static void process_memlimit_command(conn *c, token_t *tokens, const size_t ntok
         if (memlimit < 8) {
             out_string(c, "MEMLIMIT_TOO_SMALL cannot set maxbytes to less than 8m");
         } else {
-            if (slabs_adjust_mem_limit(memlimit * 1024 * 1024)) {
-                if (settings.verbose > 0) {
-                    fprintf(stderr, "maxbytes adjusted to %llum\n", (unsigned long long)memlimit);
-                }
-
-                out_string(c, "OK");
-            } else {
-                out_string(c, "MEMLIMIT_ADJUST_FAILED out of bounds or unable to adjust");
-            }
+            out_string(c, "MEMLIMIT_ADJUST_FAILED out of bounds or unable to adjust");
         }
     }
 }
@@ -3924,49 +3758,6 @@ static void process_command(conn *c, char *command) {
             raise(SIGINT);
         } else {
             out_string(c, "ERROR: shutdown not enabled");
-        }
-
-    } else if (ntokens > 1 && strcmp(tokens[COMMAND_TOKEN].value, "slabs") == 0) {
-        if (ntokens == 5 && strcmp(tokens[COMMAND_TOKEN + 1].value, "reassign") == 0) {
-            int src, dst, rv;
-
-            if (settings.slab_reassign == false) {
-                out_string(c, "CLIENT_ERROR slab reassignment disabled");
-                return;
-            }
-
-            src = strtol(tokens[2].value, NULL, 10);
-            dst = strtol(tokens[3].value, NULL, 10);
-
-            if (errno == ERANGE) {
-                out_string(c, "CLIENT_ERROR bad command line format");
-                return;
-            }
-
-            rv = slabs_reassign(src, dst);
-            switch (rv) {
-            case REASSIGN_OK:
-                out_string(c, "OK");
-                break;
-            case REASSIGN_RUNNING:
-                out_string(c, "BUSY currently processing reassign request");
-                break;
-            case REASSIGN_BADCLASS:
-                out_string(c, "BADCLASS invalid src or dst class id");
-                break;
-            case REASSIGN_NOSPARE:
-                out_string(c, "NOSPARE source class has no spare pages");
-                break;
-            case REASSIGN_SRC_DST_SAME:
-                out_string(c, "SAME src and dst class are identical");
-                break;
-            }
-            return;
-        } else if (ntokens == 4 &&
-            (strcmp(tokens[COMMAND_TOKEN + 1].value, "automove") == 0)) {
-            process_slabs_automove_command(c, tokens, ntokens);
-        } else {
-            out_string(c, "ERROR");
         }
     } else if (ntokens > 1 && strcmp(tokens[COMMAND_TOKEN].value, "lru_crawler") == 0) {
         if (ntokens == 4 && strcmp(tokens[COMMAND_TOKEN + 1].value, "crawl") == 0) {
@@ -4449,65 +4240,6 @@ static enum transmit_result transmit(conn *c) {
     }
 }
 
-/* Does a looped read to fill data chunks */
-/* TODO: restrict number of times this can loop.
- * Also, benchmark using readv's.
- */
-static int read_into_chunked_item(conn *c) {
-    int total = 0;
-    int res;
-    assert(c->rcurr != c->ritem);
-
-    while (c->rlbytes > 0) {
-        item_chunk *ch = (item_chunk *)c->ritem;
-        int unused = ch->size - ch->used;
-        /* first check if we have leftovers in the conn_read buffer */
-        if (c->rbytes > 0) {
-            total = 0;
-            int tocopy = c->rbytes > c->rlbytes ? c->rlbytes : c->rbytes;
-            tocopy = tocopy > unused ? unused : tocopy;
-            if (c->ritem != c->rcurr) {
-                memmove(ch->data + ch->used, c->rcurr, tocopy);
-            }
-            total += tocopy;
-            c->rlbytes -= tocopy;
-            c->rcurr += tocopy;
-            c->rbytes -= tocopy;
-            ch->used += tocopy;
-            if (c->rlbytes == 0) {
-                break;
-            }
-        } else {
-            /*  now try reading from the socket */
-            res = read(c->sfd, ch->data + ch->used,
-                    (unused > c->rlbytes ? c->rlbytes : unused));
-            if (res > 0) {
-                pthread_mutex_lock(&c->thread->stats.mutex);
-                c->thread->stats.bytes_read += res;
-                pthread_mutex_unlock(&c->thread->stats.mutex);
-                ch->used += res;
-                total += res;
-                c->rlbytes -= res;
-            } else {
-                /* Reset total to the latest result so caller can handle it */
-                total = res;
-                break;
-            }
-        }
-
-        assert(ch->used <= ch->size);
-        if (ch->size == ch->used) {
-            if (ch->next) {
-                c->ritem = (char *) ch->next;
-            } else {
-                /* No space left. */
-                assert(c->rlbytes == 0);
-                break;
-            }
-        }
-    }
-    return total;
-}
 
 static void drive_machine(conn *c) {
     bool stop = false;
@@ -4666,40 +4398,34 @@ static void drive_machine(conn *c) {
                 break;
             }
 
-            if (!c->item || (((item *)c->item)->it_flags & ITEM_CHUNKED) == 0) {
-                /* first check if we have leftovers in the conn_read buffer */
-                if (c->rbytes > 0) {
-                    int tocopy = c->rbytes > c->rlbytes ? c->rlbytes : c->rbytes;
-                    if (c->ritem != c->rcurr) {
-                        memmove(c->ritem, c->rcurr, tocopy);
-                    }
-                    c->ritem += tocopy;
-                    c->rlbytes -= tocopy;
-                    c->rcurr += tocopy;
-                    c->rbytes -= tocopy;
-                    if (c->rlbytes == 0) {
-                        break;
-                    }
-                }
+			/* first check if we have leftovers in the conn_read buffer */
+			if (c->rbytes > 0) {
+				int tocopy = c->rbytes > c->rlbytes ? c->rlbytes : c->rbytes;
+				if (c->ritem != c->rcurr) {
+					memmove(c->ritem, c->rcurr, tocopy);
+				}
+				c->ritem += tocopy;
+				c->rlbytes -= tocopy;
+				c->rcurr += tocopy;
+				c->rbytes -= tocopy;
+				if (c->rlbytes == 0) {
+					break;
+				}
+			}
 
-                /*  now try reading from the socket */
-                res = read(c->sfd, c->ritem, c->rlbytes);
-                if (res > 0) {
-                    pthread_mutex_lock(&c->thread->stats.mutex);
-                    c->thread->stats.bytes_read += res;
-                    pthread_mutex_unlock(&c->thread->stats.mutex);
-                    if (c->rcurr == c->ritem) {
-                        c->rcurr += res;
-                    }
-                    c->ritem += res;
-                    c->rlbytes -= res;
-                    break;
-                }
-            } else {
-                res = read_into_chunked_item(c);
-                if (res > 0)
-                    break;
-            }
+			/*  now try reading from the socket */
+			res = read(c->sfd, c->ritem, c->rlbytes);
+			if (res > 0) {
+				pthread_mutex_lock(&c->thread->stats.mutex);
+				c->thread->stats.bytes_read += res;
+				pthread_mutex_unlock(&c->thread->stats.mutex);
+				if (c->rcurr == c->ritem) {
+					c->rcurr += res;
+				}
+				c->ritem += res;
+				c->rlbytes -= res;
+				break;
+			}
 
             if (res == 0) { /* end of stream */
                 conn_set_state(c, conn_closing);
@@ -6328,8 +6054,7 @@ int main (int argc, char **argv) {
         return 1;
     }
 
-    if (settings.slab_reassign &&
-        start_slab_maintenance_thread() == -1) {
+    if (settings.slab_reassign) {
         exit(EXIT_FAILURE);
     }
 

@@ -243,17 +243,17 @@ item *do_item_alloc(char *key, const size_t nkey, const unsigned int flags,
 }
 
 void item_free(item *it) {
-    size_t ntotal = ITEM_ntotal(it);
-    unsigned int clsid;
+    //size_t ntotal = ITEM_ntotal(it);
+    //unsigned int clsid;
     assert((it->it_flags & ITEM_LINKED) == 0);
     assert(it != heads[it->slabs_clsid]);
     assert(it != tails[it->slabs_clsid]);
     assert(it->refcount == 0);
 
     /* so slab size changer can tell later if item is already free or not */
-    clsid = ITEM_clsid(it);
+    //clsid = ITEM_clsid(it);
     DEBUG_REFCNT(it, 'F');
-    slabs_free(it, ntotal, clsid);
+    //slabs_free(it, ntotal, clsid);
 }
 
 /**
@@ -270,7 +270,7 @@ bool item_size_ok(const size_t nkey, const int flags, const int nbytes) {
         ntotal += sizeof(uint64_t);
     }
 
-    return slabs_clsid(ntotal) != 0;
+    return false; //slabs_clsid(ntotal) != 0; //TODO: fix it
 }
 
 static void do_item_link_q(item *it) { /* item is the new head */
@@ -927,7 +927,7 @@ static int lru_pull_tail(const int orig_id, const int cur_lru,
                     do_item_unlink_nolock(search, hv);
                     removed++;
                     if (settings.slab_automove == 2) {
-                        slabs_reassign(-1, orig_id);
+                        //slabs_reassign(-1, orig_id);
                     }
                 } else if ((search->it_flags & ITEM_ACTIVE) != 0
                         && settings.lru_maintainer_thread) {
@@ -969,13 +969,13 @@ static int lru_pull_tail(const int orig_id, const int cur_lru,
 static int lru_maintainer_juggle(const int slabs_clsid) {
     int i;
     int did_moves = 0;
-    bool mem_limit_reached = false;
+    //bool mem_limit_reached = false;
     uint64_t total_bytes = 0;
     unsigned int chunks_perslab = 0;
     unsigned int chunks_free = 0;
     /* TODO: if free_chunks below high watermark, increase aggressiveness */
-    chunks_free = slabs_available_chunks(slabs_clsid, &mem_limit_reached,
-            &total_bytes, &chunks_perslab);
+    //chunks_free = slabs_available_chunks(slabs_clsid, &mem_limit_reached,
+    //        &total_bytes, &chunks_perslab);
     if (settings.expirezero_does_not_evict)
         total_bytes -= noexp_lru_size(slabs_clsid);
 
@@ -984,7 +984,7 @@ static int lru_maintainer_juggle(const int slabs_clsid) {
      * from this class back into the global pool (0)
      */
     if (settings.slab_automove > 0 && chunks_free > (chunks_perslab * 2.5)) {
-        slabs_reassign(slabs_clsid, SLAB_GLOBAL_PAGE_POOL);
+        //slabs_reassign(slabs_clsid, SLAB_GLOBAL_PAGE_POOL);
     }
 
     /* Juggle HOT/WARM up to N times */

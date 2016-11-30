@@ -388,7 +388,7 @@ extern struct settings settings;
 /* Appended on fetch, removed on LRU shuffling */
 #define ITEM_ACTIVE 16
 /* If an item's storage are chained chunks. */
-#define ITEM_CHUNKED 32
+#define ITEM_TODEFINE1 32
 #define ITEM_CHUNK 64
 
 /**
@@ -606,7 +606,6 @@ extern int daemonize(int nochdir, int noclose);
 #define mutex_unlock(x) pthread_mutex_unlock(x)
 
 #include "stats.h"
-#include "slabs.h"
 #include "memlog.h"
 #include "assoc.h"
 #include "items.h"

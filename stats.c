@@ -209,6 +209,40 @@ char *stats_prefix_dump(int *length) {
     return buf;
 }
 
+static int nz_strcmp(int nzlength, const char *nz, const char *z) {
+    int zlength=strlen(z);
+    return (zlength == nzlength) && (strncmp(nz, z, zlength) == 0) ? 0 : -1;
+}
+
+bool get_stats(const char *stat_type, int nkey, ADD_STAT add_stats, void *c) {
+    bool ret = true;
+
+    if (add_stats != NULL) {
+        if (!stat_type) {
+            /* prepare general statistics for the engine */
+            STATS_LOCK();
+            APPEND_STAT("bytes", "%llu", (unsigned long long)stats_state.curr_bytes);
+            APPEND_STAT("curr_items", "%llu", (unsigned long long)stats_state.curr_items);
+            APPEND_STAT("total_items", "%llu", (unsigned long long)stats.total_items);
+            STATS_UNLOCK();
+            item_stats_totals(add_stats, c);
+        } else if (nz_strcmp(nkey, stat_type, "items") == 0) {
+            item_stats(add_stats, c);
+        } else if (nz_strcmp(nkey, stat_type, "sizes") == 0) {
+            item_stats_sizes(add_stats, c);
+        } else if (nz_strcmp(nkey, stat_type, "sizes_enable") == 0) {
+            item_stats_sizes_enable(add_stats, c);
+        } else if (nz_strcmp(nkey, stat_type, "sizes_disable") == 0) {
+            item_stats_sizes_disable(add_stats, c);
+        } else {
+            ret = false;
+        }
+    } else {
+        ret = false;
+    }
+
+    return ret;
+}
 
 #ifdef UNIT_TEST
 

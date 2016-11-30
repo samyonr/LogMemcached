@@ -153,9 +153,7 @@ item *do_item_alloc(char *key, const size_t nkey, const unsigned int flags,
         ntotal += sizeof(uint64_t);
     }
 
-    unsigned int id = slabs_clsid(ntotal);
-    if (id == 0)
-        return 0;
+    unsigned int id = 1; // TODO: delete
 
     /* If no memory is available, attempt a direct LRU juggle/eviction */
     /* This is a race in order to simplify lru_pull_tail; in cases where
@@ -177,7 +175,7 @@ item *do_item_alloc(char *key, const size_t nkey, const unsigned int flags,
         if (!settings.lru_maintainer_thread) {
             lru_pull_tail(id, COLD_LRU, 0, 0);
         }
-        it = slabs_alloc(ntotal, id, &total_bytes, 0);
+        it = memlog_alloc(ntotal, &total_bytes, 0);
 
         if (settings.expirezero_does_not_evict)
             total_bytes -= noexp_lru_size(id);
@@ -239,20 +237,6 @@ item *do_item_alloc(char *key, const size_t nkey, const unsigned int flags,
     it->exptime = exptime;
     memcpy(ITEM_suffix(it), suffix, (size_t)nsuffix);
     it->nsuffix = nsuffix;
-
-    /* Need to shuffle the pointer stored in h_next into it->data. */
-    if (it->it_flags & ITEM_CHUNKED) {
-        item_chunk *chunk = (item_chunk *) ITEM_data(it);
-
-        chunk->next = (item_chunk *) it->h_next;
-        chunk->prev = 0;
-        chunk->head = it;
-        /* Need to chain back into the head's chunk */
-        chunk->next->prev = chunk;
-        chunk->size = chunk->next->size - ((char *)chunk - (char *)it);
-        chunk->used = 0;
-        assert(chunk->size > 0);
-    }
     it->h_next = 0;
 
     return it;

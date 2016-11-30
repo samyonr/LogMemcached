@@ -5620,7 +5620,7 @@ int main (int argc, char **argv) {
     int c;
     bool lock_memory = false;
     bool do_daemonize = false;
-    bool preallocate = false;
+    //bool preallocate = false;
     int maxcore = 0;
     char *username = NULL;
     char *pid_file = NULL;
@@ -5643,7 +5643,7 @@ int main (int argc, char **argv) {
     enum hashfunc_type hash_type = JENKINS_HASH;
     uint32_t tocrawl;
     uint32_t slab_sizes[MAX_NUMBER_OF_SLAB_CLASSES];
-    bool use_slab_sizes = false;
+    //bool use_slab_sizes = false;
     char *slab_sizes_unparsed = NULL;
     bool slab_chunk_size_changed = false;
 
@@ -5873,7 +5873,7 @@ int main (int argc, char **argv) {
             break;
         case 'L' :
             if (enable_large_pages() == 0) {
-                preallocate = true;
+                //preallocate = true;
             } else {
                 fprintf(stderr, "Cannot enable large pages on this system\n"
                     "(There is no Linux support as of this version)\n");
@@ -6161,7 +6161,7 @@ int main (int argc, char **argv) {
 
     if (slab_sizes_unparsed != NULL) {
         if (_parse_slab_sizes(subopts_value, slab_sizes)) {
-            use_slab_sizes = true;
+            //use_slab_sizes = true;
         } else {
             exit(EX_USAGE);
         }
@@ -6301,8 +6301,7 @@ int main (int argc, char **argv) {
     stats_init();
     assoc_init(settings.hashpower_init);
     conn_init();
-    slabs_init(settings.maxbytes, settings.factor, preallocate,
-            use_slab_sizes ? slab_sizes : NULL);
+    memlog_init();
 
     /*
      * ignore SIGPIPE signals; we can use errno == EPIPE if we

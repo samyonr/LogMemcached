@@ -13,6 +13,7 @@ memcached_SOURCES = memcached.c memcached.h \
                     jenkins_hash.c jenkins_hash.h \
                     murmur3_hash.c murmur3_hash.h \
                     slabs.c slabs.h \
+                    memlog.c memlog.h \
                     items.c items.h \
                     assoc.c assoc.h \
                     thread.c daemon.c \

@@ -84,6 +84,7 @@
 #define CHUNK_ALIGN_BYTES 8
 /* slab class max is a 6-bit number, -1. */
 #define MAX_NUMBER_OF_SLAB_CLASSES (63 + 1)
+#define MEMLOG_DEFAULT_SIZE (1 * 1024 * 1024 * 1024) // 1GB
 
 /** How long an object can reasonably be assumed to be locked before
     harvesting it on a low memory condition. Default: disabled. */
@@ -606,6 +607,7 @@ extern int daemonize(int nochdir, int noclose);
 
 #include "stats.h"
 #include "slabs.h"
+#include "memlog.h"
 #include "assoc.h"
 #include "items.h"
 #include "crawler.h"

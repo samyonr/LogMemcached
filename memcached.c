@@ -496,7 +496,7 @@ conn *conn_new(const int sfd, enum conn_states init_state,
 
         c->rbuf = (char *)malloc((size_t)c->rsize);
         c->wbuf = (char *)malloc((size_t)c->wsize);
-        c->ilist = (item **)malloc(sizeof(item *) * c->isize);
+        c->ilist = (item_metadata **)malloc(sizeof(item_metadata *) * c->isize);
         c->suffixlist = (char **)malloc(sizeof(char *) * c->suffixsize);
         c->iov = (struct iovec *)malloc(sizeof(struct iovec) * c->iovsize);
         c->msglist = (struct msghdr *)malloc(sizeof(struct msghdr) * c->msgsize);
@@ -610,7 +610,7 @@ static void conn_release_items(conn *c) {
     }
 
     while (c->ileft > 0) {
-        item *it = *(c->icurr);
+    	item_metadata *it = *(c->icurr);
         assert((it->it_flags & ITEM_SLABBED) == 0);
         item_remove(it);
         c->icurr++;
@@ -733,7 +733,7 @@ static void conn_shrink(conn *c) {
     }
 
     if (c->isize > ITEM_LIST_HIGHWAT) {
-        item **newbuf = (item**) realloc((void *)c->ilist, ITEM_LIST_INITIAL * sizeof(c->ilist[0]));
+    	item_metadata **newbuf = (item_metadata**) realloc((void *)c->ilist, ITEM_LIST_INITIAL * sizeof(c->ilist[0]));
         if (newbuf) {
             c->ilist = newbuf;
             c->isize = ITEM_LIST_INITIAL;
@@ -1002,7 +1002,7 @@ static void out_of_memory(conn *c, char *ascii_error) {
 static void complete_nread_ascii(conn *c) {
     assert(c != NULL);
 
-    item *it = c->item;
+    item_metadata *it = c->item;
     int comm = c->cmd;
     enum store_item_type ret;
     bool is_valid = false;
@@ -1011,7 +1011,7 @@ static void complete_nread_ascii(conn *c) {
     c->thread->stats.slab_stats[ITEM_clsid(it)].set_cmds++;
     pthread_mutex_unlock(&c->thread->stats.mutex);
 
-	if (strncmp(ITEM_data(it) + it->nbytes - 2, "\r\n", 2) == 0) {
+	if (strncmp(ITEM_data(it->item) + it->item->nbytes - 2, "\r\n", 2) == 0) {
 		is_valid = true;
 	}
 
@@ -1216,7 +1216,7 @@ static void write_bin_response(conn *c, void *d, int hlen, int keylen, int dlen)
 }
 
 static void complete_incr_bin(conn *c) {
-    item *it;
+	item_metadata *it;
     char *key;
     size_t nkey;
     /* Weird magic in add_delta forces me to pad here */
@@ -1281,11 +1281,11 @@ static void complete_incr_bin(conn *c) {
                             res + 2);
 
             if (it != NULL) {
-                memcpy(ITEM_data(it), tmpbuf, res);
-                memcpy(ITEM_data(it) + res, "\r\n", 2);
+                memcpy(ITEM_data(it->item), tmpbuf, res);
+                memcpy(ITEM_data(it->item) + res, "\r\n", 2);
 
                 if (store_item(it, NREAD_ADD, c)) {
-                    c->cas = ITEM_get_cas(it);
+                    c->cas = ITEM_get_cas(it->item);
                     write_bin_response(c, &rsp->message.body, 0, 0, sizeof(rsp->message.body.value));
                 } else {
                     write_bin_error(c, PROTOCOL_BINARY_RESPONSE_NOT_STORED,
@@ -1319,7 +1319,7 @@ static void complete_update_bin(conn *c) {
     enum store_item_type ret = NOT_STORED;
     assert(c != NULL);
 
-    item *it = c->item;
+    item_metadata *it = c->item;
 
     pthread_mutex_lock(&c->thread->stats.mutex);
     c->thread->stats.slab_stats[ITEM_clsid(it)].set_cmds++;
@@ -1327,8 +1327,8 @@ static void complete_update_bin(conn *c) {
 
     /* We don't actually receive the trailing two characters in the bin
      * protocol, so we're going to just set them here */
-	*(ITEM_data(it) + it->nbytes - 2) = '\r';
-	*(ITEM_data(it) + it->nbytes - 1) = '\n';
+	*(ITEM_data(it->item) + it->item->nbytes - 2) = '\r';
+	*(ITEM_data(it->item) + it->item->nbytes - 1) = '\n';
 
     ret = store_item(it, c->cmd, c);
 
@@ -1387,7 +1387,7 @@ static void complete_update_bin(conn *c) {
 }
 
 static void process_bin_get_or_touch(conn *c) {
-    item *it;
+	item_metadata *it;
 
     protocol_binary_response_get* rsp = (protocol_binary_response_get*)c->wbuf;
     char* key = binary_get_key(c);
@@ -1417,7 +1417,7 @@ static void process_bin_get_or_touch(conn *c) {
     if (it) {
         /* the length has two unnecessary bytes ("\r\n") */
         uint16_t keylen = 0;
-        uint32_t bodylen = sizeof(rsp->message.body) + (it->nbytes - 2);
+        uint32_t bodylen = sizeof(rsp->message.body) + (it->item->nbytes - 2);
 
         item_update(it);
         pthread_mutex_lock(&c->thread->stats.mutex);
@@ -1439,26 +1439,26 @@ static void process_bin_get_or_touch(conn *c) {
         }
 
         if (c->cmd == PROTOCOL_BINARY_CMD_TOUCH) {
-            bodylen -= it->nbytes - 2;
+            bodylen -= it->item->nbytes - 2;
         } else if (should_return_key) {
             bodylen += nkey;
             keylen = nkey;
         }
 
         add_bin_header(c, 0, sizeof(rsp->message.body), keylen, bodylen);
-        rsp->message.header.response.cas = htonll(ITEM_get_cas(it));
+        rsp->message.header.response.cas = htonll(ITEM_get_cas(it->item));
 
         // add the flags
-        rsp->message.body.flags = htonl(strtoul(ITEM_suffix(it), NULL, 10));
+        rsp->message.body.flags = htonl(strtoul(ITEM_suffix(it->item), NULL, 10));
         add_iov(c, &rsp->message.body, sizeof(rsp->message.body));
 
         if (should_return_key) {
-            add_iov(c, ITEM_key(it), nkey);
+            add_iov(c, ITEM_key(it->item), nkey);
         }
 
         if (should_return_value) {
             /* Add the data minus the CRLF */
-            add_iov(c, ITEM_data(it), it->nbytes - 2);
+            add_iov(c, ITEM_data(it->item), it->item->nbytes - 2);
         }
 
         conn_set_state(c, conn_mwrite);
@@ -1817,7 +1817,7 @@ static void process_bin_sasl_auth(conn *c) {
     char *key = binary_get_key(c);
     assert(key);
 
-    item *it = item_alloc(key, nkey, 0, 0, vlen);
+    item_metadata *it = item_alloc(key, nkey, 0, 0, vlen);
 
     /* Can't use a chunked item for SASL authentication. */
     if (it == 0) {
@@ -1827,7 +1827,7 @@ static void process_bin_sasl_auth(conn *c) {
     }
 
     c->item = it;
-    c->ritem = ITEM_data(it);
+    c->ritem = ITEM_data(it->item);
     c->rlbytes = vlen;
     conn_set_state(c, conn_nread);
     c->substate = bin_reading_sasl_auth_data;
@@ -1845,13 +1845,13 @@ static void process_bin_complete_sasl_auth(conn *c) {
     int vlen = c->binary_header.request.bodylen - nkey;
 
     char mech[nkey+1];
-    memcpy(mech, ITEM_key((item*)c->item), nkey);
+    memcpy(mech, ITEM_key(((item_metadata*)c->item)->item), nkey);
     mech[nkey] = 0x00;
 
     if (settings.verbose)
         fprintf(stderr, "mech:  ``%s'' with %d bytes of data\n", mech, vlen);
 
-    const char *challenge = vlen == 0 ? NULL : ITEM_data((item*) c->item);
+    const char *challenge = vlen == 0 ? NULL : ITEM_data(((item_metadata*) c->item)->item);
 
     int result=-1;
 
@@ -2123,7 +2123,7 @@ static void process_bin_update(conn *c) {
     char *key;
     int nkey;
     int vlen;
-    item *it;
+    item_metadata *it;
     protocol_binary_request_set* req = binary_get_request(c);
 
     assert(c != NULL);
@@ -2191,7 +2191,7 @@ static void process_bin_update(conn *c) {
         return;
     }
 
-    ITEM_set_cas(it, c->binary_header.request.cas);
+    ITEM_set_cas(it->item, c->binary_header.request.cas);
 
     switch (c->cmd) {
         case PROTOCOL_BINARY_CMD_ADD:
@@ -2207,12 +2207,12 @@ static void process_bin_update(conn *c) {
             assert(0);
     }
 
-    if (ITEM_get_cas(it) != 0) {
+    if (ITEM_get_cas(it->item) != 0) {
         c->cmd = NREAD_CAS;
     }
 
     c->item = it;
-    c->ritem = ITEM_data(it);
+    c->ritem = ITEM_data(it->item);
     c->rlbytes = vlen;
     conn_set_state(c, conn_nread);
     c->substate = bin_read_set_value;
@@ -2222,7 +2222,7 @@ static void process_bin_append_prepend(conn *c) {
     char *key;
     int nkey;
     int vlen;
-    item *it;
+    item_metadata *it;
 
     assert(c != NULL);
 
@@ -2253,7 +2253,7 @@ static void process_bin_append_prepend(conn *c) {
         return;
     }
 
-    ITEM_set_cas(it, c->binary_header.request.cas);
+    ITEM_set_cas(it->item, c->binary_header.request.cas);
 
     switch (c->cmd) {
         case PROTOCOL_BINARY_CMD_APPEND:
@@ -2267,7 +2267,7 @@ static void process_bin_append_prepend(conn *c) {
     }
 
     c->item = it;
-    c->ritem = ITEM_data(it);
+    c->ritem = ITEM_data(it->item);
     c->rlbytes = vlen;
     conn_set_state(c, conn_nread);
     c->substate = bin_read_set_value;
@@ -2309,7 +2309,7 @@ static void process_bin_flush(conn *c) {
 }
 
 static void process_bin_delete(conn *c) {
-    item *it;
+	item_metadata *it;
 
     protocol_binary_request_delete* req = binary_get_request(c);
 
@@ -2334,7 +2334,7 @@ static void process_bin_delete(conn *c) {
     it = item_get(key, nkey, c);
     if (it) {
         uint64_t cas = ntohll(req->message.header.request.cas);
-        if (cas == 0 || cas == ITEM_get_cas(it)) {
+        if (cas == 0 || cas == ITEM_get_cas(it->item)) {
             MEMCACHED_COMMAND_DELETE(c->sfd, ITEM_key(it), it->nkey);
             pthread_mutex_lock(&c->thread->stats.mutex);
             c->thread->stats.slab_stats[ITEM_clsid(it)].delete_hits++;
@@ -2424,14 +2424,14 @@ static void complete_nread(conn *c) {
     }
 }
 
-static void _store_item_copy_data(int comm, item *old_it, item *new_it, item *add_it) {
+static void _store_item_copy_data(int comm, item_metadata *old_it, item_metadata *new_it, item_metadata *add_it) {
     if (comm == NREAD_APPEND) {
-		memcpy(ITEM_data(new_it), ITEM_data(old_it), old_it->nbytes);
-		memcpy(ITEM_data(new_it) + old_it->nbytes - 2 /* CRLF */, ITEM_data(add_it), add_it->nbytes);
+		memcpy(ITEM_data(new_it->item), ITEM_data(old_it->item), old_it->item->nbytes);
+		memcpy(ITEM_data(new_it->item) + old_it->item->nbytes - 2 /* CRLF */, ITEM_data(add_it->item), add_it->item->nbytes);
     } else {
         /* NREAD_PREPEND */
-        memcpy(ITEM_data(new_it), ITEM_data(add_it), add_it->nbytes);
-        memcpy(ITEM_data(new_it) + add_it->nbytes - 2 /* CRLF */, ITEM_data(old_it), old_it->nbytes);
+        memcpy(ITEM_data(new_it->item), ITEM_data(add_it->item), add_it->item->nbytes);
+        memcpy(ITEM_data(new_it->item) + add_it->item->nbytes - 2 /* CRLF */, ITEM_data(old_it->item), old_it->item->nbytes);
     }
 }
 
@@ -2441,12 +2441,12 @@ static void _store_item_copy_data(int comm, item *old_it, item *new_it, item *ad
  *
  * Returns the state of storage.
  */
-enum store_item_type do_store_item(item *it, int comm, conn *c, const uint32_t hv) {
-    char *key = ITEM_key(it);
-    item *old_it = do_item_get(key, it->nkey, hv, c);
+enum store_item_type do_store_item(item_metadata *it, int comm, conn *c, const uint32_t hv) {
+    char *key = ITEM_key(it->item);
+    item_metadata *old_it = do_item_get(key, it->item->nkey, hv, c);
     enum store_item_type stored = NOT_STORED;
 
-    item *new_it = NULL;
+    item_metadata *new_it = NULL;
     uint32_t flags;
 
     if (old_it != NULL && comm == NREAD_ADD) {
@@ -2465,7 +2465,7 @@ enum store_item_type do_store_item(item *it, int comm, conn *c, const uint32_t h
             c->thread->stats.cas_misses++;
             pthread_mutex_unlock(&c->thread->stats.mutex);
         }
-        else if (ITEM_get_cas(it) == ITEM_get_cas(old_it)) {
+        else if (ITEM_get_cas(it->item) == ITEM_get_cas(old_it->item)) {
             // cas validates
             // it and old_it may belong to different classes.
             // I'm updating the stats for the one that's getting pushed out
@@ -2482,8 +2482,8 @@ enum store_item_type do_store_item(item *it, int comm, conn *c, const uint32_t h
 
             if(settings.verbose > 1) {
                 fprintf(stderr, "CAS:  failure: expected %llu, got %llu\n",
-                        (unsigned long long)ITEM_get_cas(old_it),
-                        (unsigned long long)ITEM_get_cas(it));
+                        (unsigned long long)ITEM_get_cas(old_it->item),
+                        (unsigned long long)ITEM_get_cas(it->item));
             }
             stored = EXISTS;
         }
@@ -2497,9 +2497,9 @@ enum store_item_type do_store_item(item *it, int comm, conn *c, const uint32_t h
             /*
              * Validate CAS
              */
-            if (ITEM_get_cas(it) != 0) {
+            if (ITEM_get_cas(it->item) != 0) {
                 // CAS much be equal
-                if (ITEM_get_cas(it) != ITEM_get_cas(old_it)) {
+                if (ITEM_get_cas(it->item) != ITEM_get_cas(old_it->item)) {
                     stored = EXISTS;
                 }
             }
@@ -2508,9 +2508,9 @@ enum store_item_type do_store_item(item *it, int comm, conn *c, const uint32_t h
                 /* we have it and old_it here - alloc memory to hold both */
                 /* flags was already lost - so recover them from ITEM_suffix(it) */
 
-                flags = (uint32_t) strtoul(ITEM_suffix(old_it), (char **) NULL, 10);
+                flags = (uint32_t) strtoul(ITEM_suffix(old_it->item), (char **) NULL, 10);
 
-                new_it = do_item_alloc(key, it->nkey, flags, old_it->exptime, it->nbytes + old_it->nbytes - 2 /* CRLF */);
+                new_it = do_item_alloc(key, it->item->nkey, flags, old_it->item->exptime, it->item->nbytes + old_it->item->nbytes - 2 /* CRLF */);
 
                 if (new_it == NULL) {
                     failed_alloc = 1;
@@ -2530,7 +2530,7 @@ enum store_item_type do_store_item(item *it, int comm, conn *c, const uint32_t h
             else
                 do_item_link(it, hv);
 
-            c->cas = ITEM_get_cas(it);
+            c->cas = ITEM_get_cas(it->item);
 
             stored = STORED;
         }
@@ -2542,10 +2542,10 @@ enum store_item_type do_store_item(item *it, int comm, conn *c, const uint32_t h
         do_item_remove(new_it);
 
     if (stored == STORED) {
-        c->cas = ITEM_get_cas(it);
+        c->cas = ITEM_get_cas(it->item);
     }
     LOGGER_LOG(c->thread->l, LOG_MUTATIONS, LOGGER_ITEM_STORE, NULL,
-            stored, comm, ITEM_key(it), it->nkey);
+            stored, comm, ITEM_key(it->item), it->item->nkey);
 
     return stored;
 }
@@ -3030,7 +3030,7 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens,
     char *key;
     size_t nkey;
     int i = 0;
-    item *it;
+    item_metadata *it;
     token_t *key_token = &tokens[KEY_TOKEN];
     char *suffix;
     assert(c != NULL);
@@ -3055,7 +3055,7 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens,
             }
             if (it) {
                 if (i >= c->isize) {
-                    item **new_list = realloc(c->ilist, sizeof(item *) * c->isize * 2);
+                	item_metadata **new_list = realloc(c->ilist, sizeof(item_metadata *) * c->isize * 2);
                     if (new_list) {
                         c->isize *= 2;
                         c->ilist = new_list;
@@ -3111,16 +3111,16 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens,
                   *(c->suffixlist + i) = suffix;
                   int suffix_len = snprintf(suffix, SUFFIX_SIZE,
                                             " %llu\r\n",
-                                            (unsigned long long)ITEM_get_cas(it));
+                                            (unsigned long long)ITEM_get_cas(it->item));
                   if (add_iov(c, "VALUE ", 6) != 0 ||
-                      add_iov(c, ITEM_key(it), it->nkey) != 0 ||
-                      add_iov(c, ITEM_suffix(it), it->nsuffix - 2) != 0 ||
+                      add_iov(c, ITEM_key(it->item), it->item->nkey) != 0 ||
+                      add_iov(c, ITEM_suffix(it->item), it->item->nsuffix - 2) != 0 ||
                       add_iov(c, suffix, suffix_len) != 0)
                       {
                           item_remove(it);
                           break;
                       }
-                  add_iov(c, ITEM_data(it), it->nbytes);
+                  add_iov(c, ITEM_data(it->item), it->item->nbytes);
 
                 }
                 else
@@ -3128,12 +3128,12 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens,
                   MEMCACHED_COMMAND_GET(c->sfd, ITEM_key(it), it->nkey,
                                         it->nbytes, ITEM_get_cas(it));
                   if (add_iov(c, "VALUE ", 6) != 0 ||
-                      add_iov(c, ITEM_key(it), it->nkey) != 0)
+                      add_iov(c, ITEM_key(it->item), it->item->nkey) != 0)
                       {
                           item_remove(it);
                           break;
                       }
-				  if (add_iov(c, ITEM_suffix(it), it->nsuffix + it->nbytes) != 0)
+				  if (add_iov(c, ITEM_suffix(it->item), it->item->nsuffix + it->item->nbytes) != 0)
 				  {
 					  item_remove(it);
 					  break;
@@ -3144,7 +3144,7 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens,
                 if (settings.verbose > 1) {
                     int ii;
                     fprintf(stderr, ">%d sending key ", c->sfd);
-                    for (ii = 0; ii < it->nkey; ++ii) {
+                    for (ii = 0; ii < it->item->nkey; ++ii) {
                         fprintf(stderr, "%c", key[ii]);
                     }
                     fprintf(stderr, "\n");
@@ -3214,7 +3214,7 @@ static void process_update_command(conn *c, token_t *tokens, const size_t ntoken
     time_t exptime;
     int vlen;
     uint64_t req_cas_id=0;
-    item *it;
+    item_metadata *it;
 
     assert(c != NULL);
 
@@ -3291,11 +3291,11 @@ static void process_update_command(conn *c, token_t *tokens, const size_t ntoken
 
         return;
     }
-    ITEM_set_cas(it, req_cas_id);
+    ITEM_set_cas(it->item, req_cas_id);
 
     c->item = it;
-    c->ritem = ITEM_data(it);
-    c->rlbytes = it->nbytes;
+    c->ritem = ITEM_data(it->item);
+    c->rlbytes = it->item->nbytes;
     c->cmd = comm;
     conn_set_state(c, conn_nread);
 }
@@ -3304,7 +3304,7 @@ static void process_touch_command(conn *c, token_t *tokens, const size_t ntokens
     char *key;
     size_t nkey;
     int32_t exptime_int = 0;
-    item *it;
+    item_metadata *it;
 
     assert(c != NULL);
 
@@ -3410,7 +3410,7 @@ enum delta_result_type do_add_delta(conn *c, const char *key, const size_t nkey,
     char *ptr;
     uint64_t value;
     int res;
-    item *it;
+    item_metadata *it;
 
     it = do_item_get(key, nkey, hv, c);
     if (!it) {
@@ -3419,16 +3419,16 @@ enum delta_result_type do_add_delta(conn *c, const char *key, const size_t nkey,
 
     /* Can't delta zero byte values. 2-byte are the "\r\n" */
     /* Also can't delta for chunked items. Too large to be a number */
-    if (it->nbytes <= 2) {
+    if (it->item->nbytes <= 2) {
         return NON_NUMERIC;
     }
 
-    if (cas != NULL && *cas != 0 && ITEM_get_cas(it) != *cas) {
+    if (cas != NULL && *cas != 0 && ITEM_get_cas(it->item) != *cas) {
         do_item_remove(it);
         return DELTA_ITEM_CAS_MISMATCH;
     }
 
-    ptr = ITEM_data(it);
+    ptr = ITEM_data(it->item);
 
     if (!safe_strtoull(ptr, &value)) {
         do_item_remove(it);
@@ -3460,32 +3460,32 @@ enum delta_result_type do_add_delta(conn *c, const char *key, const size_t nkey,
     /* refcount == 2 means we are the only ones holding the item, and it is
      * linked. We hold the item's lock in this function, so refcount cannot
      * increase. */
-    if (res + 2 <= it->nbytes && it->refcount == 2) { /* replace in-place */
+    if (res + 2 <= it->item->nbytes && it->refcount == 2) { /* replace in-place */
         /* When changing the value without replacing the item, we
            need to update the CAS on the existing item. */
         /* We also need to fiddle it in the sizes tracker in case the tracking
          * was enabled at runtime, since it relies on the CAS value to know
          * whether to remove an item or not. */
         item_stats_sizes_remove(it);
-        ITEM_set_cas(it, (settings.use_cas) ? get_cas_id() : 0);
+        ITEM_set_cas(it->item, (settings.use_cas) ? get_cas_id() : 0);
         item_stats_sizes_add(it);
-        memcpy(ITEM_data(it), buf, res);
-        memset(ITEM_data(it) + res, ' ', it->nbytes - res - 2);
+        memcpy(ITEM_data(it->item), buf, res);
+        memset(ITEM_data(it->item) + res, ' ', it->item->nbytes - res - 2);
         do_item_update(it);
     } else if (it->refcount > 1) {
-        item *new_it;
-        uint32_t flags = (uint32_t) strtoul(ITEM_suffix(it)+1, (char **) NULL, 10);
-        new_it = do_item_alloc(ITEM_key(it), it->nkey, flags, it->exptime, res + 2);
+    	item_metadata *new_it;
+        uint32_t flags = (uint32_t) strtoul(ITEM_suffix(it->item)+1, (char **) NULL, 10);
+        new_it = do_item_alloc(ITEM_key(it->item), it->item->nkey, flags, it->item->exptime, res + 2);
         if (new_it == 0) {
             do_item_remove(it);
             return EOM;
         }
-        memcpy(ITEM_data(new_it), buf, res);
-        memcpy(ITEM_data(new_it) + res, "\r\n", 2);
+        memcpy(ITEM_data(new_it->item), buf, res);
+        memcpy(ITEM_data(new_it->item) + res, "\r\n", 2);
         item_replace(it, new_it, hv);
         // Overwrite the older item's CAS with our new CAS since we're
         // returning the CAS of the old item below.
-        ITEM_set_cas(it, (settings.use_cas) ? ITEM_get_cas(new_it) : 0);
+        ITEM_set_cas(it->item, (settings.use_cas) ? ITEM_get_cas(new_it->item) : 0);
         do_item_remove(new_it);       /* release our reference */
     } else {
         /* Should never get here. This means we somehow fetched an unlinked
@@ -3499,7 +3499,7 @@ enum delta_result_type do_add_delta(conn *c, const char *key, const size_t nkey,
     }
 
     if (cas) {
-        *cas = ITEM_get_cas(it);    /* swap the incoming CAS value */
+        *cas = ITEM_get_cas(it->item);    /* swap the incoming CAS value */
     }
     do_item_remove(it);         /* release our reference */
     return OK;
@@ -3508,7 +3508,7 @@ enum delta_result_type do_add_delta(conn *c, const char *key, const size_t nkey,
 static void process_delete_command(conn *c, token_t *tokens, const size_t ntokens) {
     char *key;
     size_t nkey;
-    item *it;
+    item_metadata *it;
 
     assert(c != NULL);
 
@@ -6028,7 +6028,7 @@ int main (int argc, char **argv) {
     assoc_init(settings.hashpower_init);
     conn_init();
     memlog_init();
-
+    freelist_init(MEMLOG_DEFAULT_SIZE);
     /*
      * ignore SIGPIPE signals; we can use errno == EPIPE if we
      * need that information

@@ -32,7 +32,7 @@ typedef struct {
 
 typedef struct _crawler_module_t crawler_module_t;
 
-typedef void (*crawler_eval_func)(crawler_module_t *cm, item *it, uint32_t hv, int slab_cls);
+typedef void (*crawler_eval_func)(crawler_module_t *cm, item_metadata *it, uint32_t hv, int slab_cls);
 typedef int (*crawler_init_func)(crawler_module_t *cm, void *data); // TODO: init args?
 typedef void (*crawler_deinit_func)(crawler_module_t *cm); // TODO: extra args?
 typedef void (*crawler_doneclass_func)(crawler_module_t *cm, int slab_cls);
@@ -56,7 +56,7 @@ struct _crawler_module_t {
 static int crawler_expired_init(crawler_module_t *cm, void *data);
 static void crawler_expired_doneclass(crawler_module_t *cm, int slab_cls);
 static void crawler_expired_finalize(crawler_module_t *cm);
-static void crawler_expired_eval(crawler_module_t *cm, item *search, uint32_t hv, int i);
+static void crawler_expired_eval(crawler_module_t *cm, item_metadata *search, uint32_t hv, int i);
 
 crawler_module_reg_t crawler_expired_mod = {
     .init = crawler_expired_init,
@@ -67,7 +67,7 @@ crawler_module_reg_t crawler_expired_mod = {
     .needs_client = false
 };
 
-static void crawler_metadump_eval(crawler_module_t *cm, item *search, uint32_t hv, int i);
+static void crawler_metadump_eval(crawler_module_t *cm, item_metadata *search, uint32_t hv, int i);
 
 crawler_module_reg_t crawler_metadump_mod = {
     .init = NULL,
@@ -170,23 +170,23 @@ static void crawler_expired_finalize(crawler_module_t *cm) {
 /* I pulled this out to make the main thread clearer, but it reaches into the
  * main thread's values too much. Should rethink again.
  */
-static void crawler_expired_eval(crawler_module_t *cm, item *search, uint32_t hv, int i) {
+static void crawler_expired_eval(crawler_module_t *cm, item_metadata *search, uint32_t hv, int i) {
     int slab_id = CLEAR_LRU(i);
     struct crawler_expired_data *d = (struct crawler_expired_data *) cm->data;
     pthread_mutex_lock(&d->lock);
     crawlerstats_t *s = &d->crawlerstats[slab_id];
     int is_flushed = item_is_flushed(search);
-    if ((search->exptime != 0 && search->exptime < current_time)
+    if ((search->item->exptime != 0 && search->item->exptime < current_time)
         || is_flushed) {
         crawlers[i].reclaimed++;
         s->reclaimed++;
 
         if (settings.verbose > 1) {
             int ii;
-            char *key = ITEM_key(search);
+            char *key = ITEM_key(search->item);
             fprintf(stderr, "LRU crawler found an expired item (flags: %d, slab: %d): ",
                 search->it_flags, search->slabs_clsid);
-            for (ii = 0; ii < search->nkey; ++ii) {
+            for (ii = 0; ii < search->item->nkey; ++ii) {
                 fprintf(stderr, "%c", key[ii]);
             }
             fprintf(stderr, "\n");
@@ -200,12 +200,12 @@ static void crawler_expired_eval(crawler_module_t *cm, item *search, uint32_t hv
     } else {
         s->seen++;
         refcount_decr(&search->refcount);
-        if (search->exptime == 0) {
+        if (search->item->exptime == 0) {
             s->noexp++;
-        } else if (search->exptime - current_time > 3599) {
+        } else if (search->item->exptime - current_time > 3599) {
             s->ttl_hourplus++;
         } else {
-            rel_time_t ttl_remain = search->exptime - current_time;
+            rel_time_t ttl_remain = search->item->exptime - current_time;
             int bucket = ttl_remain / 60;
             s->histo[bucket]++;
         }
@@ -213,24 +213,24 @@ static void crawler_expired_eval(crawler_module_t *cm, item *search, uint32_t hv
     pthread_mutex_unlock(&d->lock);
 }
 
-static void crawler_metadump_eval(crawler_module_t *cm, item *it, uint32_t hv, int i) {
+static void crawler_metadump_eval(crawler_module_t *cm, item_metadata *it, uint32_t hv, int i) {
     //int slab_id = CLEAR_LRU(i);
     char keybuf[KEY_MAX_LENGTH * 3 + 1];
     int is_flushed = item_is_flushed(it);
     /* Ignore expired content. */
-    if ((it->exptime != 0 && it->exptime < current_time)
+    if ((it->item->exptime != 0 && it->item->exptime < current_time)
         || is_flushed) {
         refcount_decr(&it->refcount);
         return;
     }
     // TODO: uriencode directly into the buffer.
-    uriencode(ITEM_key(it), keybuf, it->nkey, KEY_MAX_LENGTH * 3 + 1);
+    uriencode(ITEM_key(it->item), keybuf, it->item->nkey, KEY_MAX_LENGTH * 3 + 1);
     int total = snprintf(cm->c.cbuf, 4096,
             "key=%s exp=%ld la=%llu cas=%llu fetch=%s\n",
             keybuf,
-            (it->exptime == 0) ? -1 : (long)it->exptime + process_started,
+            (it->item->exptime == 0) ? -1 : (long)it->item->exptime + process_started,
             (unsigned long long)it->time + process_started,
-            (unsigned long long)ITEM_get_cas(it),
+            (unsigned long long)ITEM_get_cas(it->item),
             (it->it_flags & ITEM_FETCHED) ? "yes" : "no");
     refcount_decr(&it->refcount);
     // TODO: some way of tracking the errors. these are very unlikely though.
@@ -308,7 +308,7 @@ static int lru_crawler_client_getbuf(crawler_client_t *c) {
 static void lru_crawler_class_done(int i) {
     crawlers[i].it_flags = 0;
     crawler_count--;
-    do_item_unlinktail_q((item *)&crawlers[i]);
+    do_item_unlinktail_q((item_metadata *)&crawlers[i]);
     do_item_stats_add_crawl(i, crawlers[i].reclaimed,
             crawlers[i].unfetched, crawlers[i].checked);
     pthread_mutex_unlock(&lru_locks[i]);
@@ -329,7 +329,7 @@ static void *item_crawler_thread(void *arg) {
     pthread_cond_wait(&lru_crawler_cond, &lru_crawler_lock);
 
     while (crawler_count) {
-        item *search = NULL;
+    	item_metadata *search = NULL;
         void *hold_lock = NULL;
 
         for (i = POWER_SMALLEST; i < LARGEST_ID; i++) {
@@ -346,7 +346,7 @@ static void *item_crawler_thread(void *arg) {
                 }
             }
             pthread_mutex_lock(&lru_locks[i]);
-            search = do_item_crawl_q((item *)&crawlers[i]);
+            search = do_item_crawl_q((item_metadata *)&crawlers[i]);
             if (search == NULL ||
                 (crawlers[i].remaining && --crawlers[i].remaining < 1)) {
                 if (settings.verbose > 2)
@@ -354,7 +354,7 @@ static void *item_crawler_thread(void *arg) {
                 lru_crawler_class_done(i);
                 continue;
             }
-            uint32_t hv = hash(ITEM_key(search), search->nkey);
+            uint32_t hv = hash(ITEM_key(search->item), search->item->nkey);
             /* Attempt to hash item lock the "search" item. If locked, no
              * other callers can incr the refcount
              */
@@ -495,7 +495,7 @@ static int do_lru_crawler_start(uint32_t id, uint32_t remaining) {
             crawlers[sid].reclaimed = 0;
             crawlers[sid].unfetched = 0;
             crawlers[sid].checked = 0;
-            do_item_linktail_q((item *)&crawlers[sid]);
+            do_item_linktail_q((item_metadata *)&crawlers[sid]);
             crawler_count++;
             starts++;
         //}

@@ -563,13 +563,13 @@ logger *logger_create(void) {
 
 /* helpers for logger_log */
 
-static void _logger_log_evictions(logentry *e, item *it) {
+static void _logger_log_evictions(logentry *e, item_metadata *it) {
     struct logentry_eviction *le = (struct logentry_eviction *) e->data;
-    le->exptime = (it->exptime > 0) ? (long long int)(it->exptime - current_time) : (long long int) -1;
+    le->exptime = (it->item->exptime > 0) ? (long long int)(it->item->exptime - current_time) : (long long int) -1;
     le->latime = current_time - it->time;
     le->it_flags = it->it_flags;
-    le->nkey = it->nkey;
-    memcpy(le->key, ITEM_key(it), it->nkey);
+    le->nkey = it->item->nkey;
+    memcpy(le->key, ITEM_key(it->item), it->item->nkey);
     e->size = sizeof(struct logentry_eviction) + le->nkey;
 }
 
@@ -643,7 +643,7 @@ enum logger_ret_type logger_log(logger *l, const enum log_entry_type event, cons
 
             break;
         case LOGGER_EVICTION_ENTRY:
-            _logger_log_evictions(e, (item *)entry);
+            _logger_log_evictions(e, (item_metadata *)entry);
             break;
         case LOGGER_ITEM_GET_ENTRY:
             va_start(ap, entry);

@@ -91,28 +91,28 @@
 #define TAIL_REPAIR_TIME_DEFAULT 0
 
 /* warning: don't use these macros with a function, as it evals its arg twice */
-#define ITEM_get_cas(i) (((i)->it_flags & ITEM_CAS) ? \
+#define ITEM_get_cas(i) (((i)->it_data_flags & ITEM_CAS) ? \
         (i)->data->cas : (uint64_t)0)
 
 #define ITEM_set_cas(i,v) { \
-    if ((i)->it_flags & ITEM_CAS) { \
+    if ((i)->it_data_flags & ITEM_CAS) { \
         (i)->data->cas = v; \
     } \
 }
 
 #define ITEM_key(item) (((char*)&((item)->data)) \
-         + (((item)->it_flags & ITEM_CAS) ? sizeof(uint64_t) : 0))
+         + (((item)->it_data_flags & ITEM_CAS) ? sizeof(uint64_t) : 0))
 
 #define ITEM_suffix(item) ((char*) &((item)->data) + (item)->nkey + 1 \
-         + (((item)->it_flags & ITEM_CAS) ? sizeof(uint64_t) : 0))
+         + (((item)->it_data_flags & ITEM_CAS) ? sizeof(uint64_t) : 0))
 
 #define ITEM_data(item) ((char*) &((item)->data) + (item)->nkey + 1 \
          + (item)->nsuffix \
-         + (((item)->it_flags & ITEM_CAS) ? sizeof(uint64_t) : 0))
+         + (((item)->it_data_flags & ITEM_CAS) ? sizeof(uint64_t) : 0))
 
-#define ITEM_ntotal(item) (sizeof(struct _stritem) + (item)->nkey + 1 \
+#define ITEM_ntotal(item) (sizeof(struct _stritem_data) + (item)->nkey + 1 \
          + (item)->nsuffix + (item)->nbytes \
-         + (((item)->it_flags & ITEM_CAS) ? sizeof(uint64_t) : 0))
+         + (((item)->it_data_flags & ITEM_CAS) ? sizeof(uint64_t) : 0))
 
 #define ITEM_clsid(item) ((item)->slabs_clsid & ~(3<<6))
 
@@ -394,19 +394,11 @@ extern struct settings settings;
 /**
  * Structure for storing items within memcached.
  */
-typedef struct _stritem {
-    /* Protected by LRU locks */
-    struct _stritem *next;
-    struct _stritem *prev;
-    /* Rest are protected by an item lock */
-    struct _stritem *h_next;    /* hash chain next */
-    rel_time_t      time;       /* least recent access */
+typedef struct _stritem_data {
     rel_time_t      exptime;    /* expire time */
     int             nbytes;     /* size of data */
-    unsigned short  refcount;
     uint8_t         nsuffix;    /* length of flags-and-length string */
-    uint8_t         it_flags;   /* ITEM_* above */
-    uint8_t         slabs_clsid;/* which slab class we're in */
+    uint8_t         it_data_flags;   /* ITEM_DATA* above */
     uint8_t         nkey;       /* key length, w/terminating null and padding */
     /* this odd type prevents type-punning issues when we do
      * the little shuffle to save space when not using CAS. */
@@ -418,7 +410,23 @@ typedef struct _stritem {
     /* then null-terminated key */
     /* then " flags length\r\n" (no terminating null) */
     /* then data with terminating \r\n (no terminating null; it's binary!) */
-} item;
+} item_data;
+
+/**
+ * Structure for storing items within memcached.
+ */
+typedef struct _stritem_metadata {
+    /* Protected by LRU locks */
+    struct _stritem_metadata *next;
+    struct _stritem_metadata *prev;
+    /* Rest are protected by an item lock */
+    struct _stritem_metadata *h_next;    /* hash chain next */
+    rel_time_t      time;       /* least recent access */
+    unsigned short  refcount;
+    uint8_t         it_flags;   /* ITEM_* above */
+    uint8_t         slabs_clsid;/* which slab class we're in */
+    item_data		*item;
+} item_metadata;
 
 // TODO: If we eventually want user loaded modules, we can't use an enum :(
 enum crawler_run_type {
@@ -426,9 +434,9 @@ enum crawler_run_type {
 };
 
 typedef struct {
-    struct _stritem *next;
-    struct _stritem *prev;
-    struct _stritem *h_next;    /* hash chain next */
+    struct _stritem_metadata *next;
+    struct _stritem_metadata *prev;
+    struct _stritem_metadata *h_next;    /* hash chain next */
     rel_time_t      time;       /* least recent access */
     rel_time_t      exptime;    /* expire time */
     int             nbytes;     /* size of data */
@@ -447,7 +455,7 @@ typedef struct {
 typedef struct _strchunk {
     struct _strchunk *next;     /* points within its own chain. */
     struct _strchunk *prev;     /* can potentially point to the head. */
-    struct _stritem  *head;     /* always points to the owner chunk */
+    struct _stritem_metadata  *head;     /* always points to the owner chunk */
     int              size;      /* available chunk space in bytes */
     int              used;      /* chunk space used */
     int              nbytes;    /* used. */
@@ -525,9 +533,9 @@ struct conn {
     int    msgcurr;   /* element in msglist[] being transmitted now */
     int    msgbytes;  /* number of bytes in current msg */
 
-    item   **ilist;   /* list of items to write out */
+    item_metadata   **ilist;   /* list of items to write out */
     int    isize;
-    item   **icurr;
+    item_metadata   **icurr;
     int    ileft;
 
     char   **suffixlist;
@@ -597,7 +605,7 @@ enum delta_result_type do_add_delta(conn *c, const char *key,
                                     const size_t nkey, const bool incr,
                                     const int64_t delta, char *buf,
                                     uint64_t *cas, const uint32_t hv);
-enum store_item_type do_store_item(item *item, int comm, conn* c, const uint32_t hv);
+enum store_item_type do_store_item(item_metadata *item, int comm, conn* c, const uint32_t hv);
 conn *conn_new(const int sfd, const enum conn_states init_state, const int event_flags, const int read_buffer_size, enum network_transport transport, struct event_base *base);
 void conn_worker_readd(conn *c);
 extern int daemonize(int nochdir, int noclose);
@@ -635,14 +643,14 @@ void accept_new_conns(const bool do_accept);
 conn *conn_from_freelist(void);
 bool  conn_add_to_freelist(conn *c);
 void  conn_close_idle(conn *c);
-item *item_alloc(char *key, size_t nkey, int flags, rel_time_t exptime, int nbytes);
-item *item_get(const char *key, const size_t nkey, conn *c);
-item *item_touch(const char *key, const size_t nkey, uint32_t exptime, conn *c);
-int   item_link(item *it);
-void  item_remove(item *it);
-int   item_replace(item *it, item *new_it, const uint32_t hv);
-void  item_unlink(item *it);
-void  item_update(item *it);
+item_metadata *item_alloc(char *key, size_t nkey, int flags, rel_time_t exptime, int nbytes);
+item_metadata *item_get(const char *key, const size_t nkey, conn *c);
+item_metadata *item_touch(const char *key, const size_t nkey, uint32_t exptime, conn *c);
+int   item_link(item_metadata *it);
+void  item_remove(item_metadata *it);
+int   item_replace(item_metadata *it, item_metadata *new_it, const uint32_t hv);
+void  item_unlink(item_metadata *it);
+void  item_update(item_metadata *it);
 
 void item_lock(uint32_t hv);
 void *item_trylock(uint32_t hv);
@@ -661,7 +669,7 @@ void slab_stats_aggregate(struct thread_stats *stats, struct slab_stats *out);
 void append_stat(const char *name, ADD_STAT add_stats, conn *c,
                  const char *fmt, ...);
 
-enum store_item_type store_item(item *item, int comm, conn *c);
+enum store_item_type store_item(item_metadata *item, int comm, conn *c);
 
 #if HAVE_DROP_PRIVILEGES
 extern void drop_privileges(void);

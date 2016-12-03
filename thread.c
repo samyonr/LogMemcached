@@ -532,8 +532,8 @@ void sidethread_conn_close(conn *c) {
 /*
  * Allocates a new item.
  */
-item *item_alloc(char *key, size_t nkey, int flags, rel_time_t exptime, int nbytes) {
-    item *it;
+item_metadata *item_alloc(char *key, size_t nkey, int flags, rel_time_t exptime, int nbytes) {
+    item_metadata *it;
     /* do_item_alloc handles its own locks */
     it = do_item_alloc(key, nkey, flags, exptime, nbytes);
     return it;
@@ -543,8 +543,8 @@ item *item_alloc(char *key, size_t nkey, int flags, rel_time_t exptime, int nbyt
  * Returns an item if it hasn't been marked as expired,
  * lazy-expiring as needed.
  */
-item *item_get(const char *key, const size_t nkey, conn *c) {
-    item *it;
+item_metadata *item_get(const char *key, const size_t nkey, conn *c) {
+	item_metadata *it;
     uint32_t hv;
     hv = hash(key, nkey);
     item_lock(hv);
@@ -553,8 +553,8 @@ item *item_get(const char *key, const size_t nkey, conn *c) {
     return it;
 }
 
-item *item_touch(const char *key, size_t nkey, uint32_t exptime, conn *c) {
-    item *it;
+item_metadata *item_touch(const char *key, size_t nkey, uint32_t exptime, conn *c) {
+	item_metadata *it;
     uint32_t hv;
     hv = hash(key, nkey);
     item_lock(hv);
@@ -566,11 +566,11 @@ item *item_touch(const char *key, size_t nkey, uint32_t exptime, conn *c) {
 /*
  * Links an item into the LRU and hashtable.
  */
-int item_link(item *item) {
+int item_link(item_metadata *item) {
     int ret;
     uint32_t hv;
 
-    hv = hash(ITEM_key(item), item->nkey);
+    hv = hash(ITEM_key(item->item), item->item->nkey);
     item_lock(hv);
     ret = do_item_link(item, hv);
     item_unlock(hv);
@@ -581,9 +581,9 @@ int item_link(item *item) {
  * Decrements the reference count on an item and adds it to the freelist if
  * needed.
  */
-void item_remove(item *item) {
+void item_remove(item_metadata *item) {
     uint32_t hv;
-    hv = hash(ITEM_key(item), item->nkey);
+    hv = hash(ITEM_key(item->item), item->item->nkey);
 
     item_lock(hv);
     do_item_remove(item);
@@ -595,16 +595,16 @@ void item_remove(item *item) {
  * Unprotected by a mutex lock since the core server does not require
  * it to be thread-safe.
  */
-int item_replace(item *old_it, item *new_it, const uint32_t hv) {
+int item_replace(item_metadata *old_it, item_metadata *new_it, const uint32_t hv) {
     return do_item_replace(old_it, new_it, hv);
 }
 
 /*
  * Unlinks an item from the LRU and hashtable.
  */
-void item_unlink(item *item) {
+void item_unlink(item_metadata *item) {
     uint32_t hv;
-    hv = hash(ITEM_key(item), item->nkey);
+    hv = hash(ITEM_key(item->item), item->item->nkey);
     item_lock(hv);
     do_item_unlink(item, hv);
     item_unlock(hv);
@@ -613,9 +613,9 @@ void item_unlink(item *item) {
 /*
  * Moves an item to the back of the LRU queue.
  */
-void item_update(item *item) {
+void item_update(item_metadata *item) {
     uint32_t hv;
-    hv = hash(ITEM_key(item), item->nkey);
+    hv = hash(ITEM_key(item->item), item->item->nkey);
 
     item_lock(hv);
     do_item_update(item);
@@ -642,11 +642,11 @@ enum delta_result_type add_delta(conn *c, const char *key,
 /*
  * Stores an item in the cache (high level, obeys set/add/replace semantics)
  */
-enum store_item_type store_item(item *item, int comm, conn* c) {
+enum store_item_type store_item(item_metadata *item, int comm, conn* c) {
     enum store_item_type ret;
     uint32_t hv;
 
-    hv = hash(ITEM_key(item), item->nkey);
+    hv = hash(ITEM_key(item->item), item->item->nkey);
     item_lock(hv);
     ret = do_store_item(item, comm, c, hv);
     item_unlock(hv);

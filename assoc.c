@@ -39,13 +39,13 @@ unsigned int hashpower = HASHPOWER_DEFAULT;
 #define hashmask(n) (hashsize(n)-1)
 
 /* Main hash table. This is where we look except during expansion. */
-static item** primary_hashtable = 0;
+static item_metadata** primary_hashtable = 0;
 
 /*
  * Previous hash table. During expansion, we look here for keys that haven't
  * been moved over to the primary yet.
  */
-static item** old_hashtable = 0;
+static item_metadata** old_hashtable = 0;
 
 /* Number of items in the hash table. */
 static unsigned int hash_items = 0;
@@ -75,8 +75,8 @@ void assoc_init(const int hashtable_init) {
     STATS_UNLOCK();
 }
 
-item *assoc_find(const char *key, const size_t nkey, const uint32_t hv) {
-    item *it;
+item_metadata *assoc_find(const char *key, const size_t nkey, const uint32_t hv) {
+    item_metadata *it;
     unsigned int oldbucket;
 
     if (expanding &&
@@ -87,10 +87,10 @@ item *assoc_find(const char *key, const size_t nkey, const uint32_t hv) {
         it = primary_hashtable[hv & hashmask(hashpower)];
     }
 
-    item *ret = NULL;
+    item_metadata *ret = NULL;
     int depth = 0;
     while (it) {
-        if ((nkey == it->nkey) && (memcmp(key, ITEM_key(it), nkey) == 0)) {
+        if ((nkey == it->item->nkey) && (memcmp(key, ITEM_key(it->item), nkey) == 0)) {
             ret = it;
             break;
         }
@@ -104,8 +104,8 @@ item *assoc_find(const char *key, const size_t nkey, const uint32_t hv) {
 /* returns the address of the item pointer before the key.  if *item == 0,
    the item wasn't found */
 
-static item** _hashitem_before (const char *key, const size_t nkey, const uint32_t hv) {
-    item **pos;
+static item_metadata** _hashitem_before (const char *key, const size_t nkey, const uint32_t hv) {
+    item_metadata **pos;
     unsigned int oldbucket;
 
     if (expanding &&
@@ -116,7 +116,7 @@ static item** _hashitem_before (const char *key, const size_t nkey, const uint32
         pos = &primary_hashtable[hv & hashmask(hashpower)];
     }
 
-    while (*pos && ((nkey != (*pos)->nkey) || memcmp(key, ITEM_key(*pos), nkey))) {
+    while (*pos && ((nkey != (*pos)->item->nkey) || memcmp(key, ITEM_key((*pos)->item), nkey))) {
         pos = &(*pos)->h_next;
     }
     return pos;
@@ -153,7 +153,7 @@ static void assoc_start_expand(void) {
 }
 
 /* Note: this isn't an assoc_update.  The key must not already exist to call this */
-int assoc_insert(item *it, const uint32_t hv) {
+int assoc_insert(item_metadata *it, const uint32_t hv) {
     unsigned int oldbucket;
 
 //    assert(assoc_find(ITEM_key(it), it->nkey) == 0);  /* shouldn't have duplicately named things defined */
@@ -180,10 +180,10 @@ int assoc_insert(item *it, const uint32_t hv) {
 }
 
 void assoc_delete(const char *key, const size_t nkey, const uint32_t hv) {
-    item **before = _hashitem_before(key, nkey, hv);
+    item_metadata **before = _hashitem_before(key, nkey, hv);
 
     if (*before) {
-        item *nxt;
+    	item_metadata *nxt;
         pthread_mutex_lock(&hash_items_counter_lock);
         hash_items--;
         pthread_mutex_unlock(&hash_items_counter_lock);
@@ -215,7 +215,7 @@ static void *assoc_maintenance_thread(void *arg) {
 
         /* There is only one expansion thread, so no need to global lock. */
         for (ii = 0; ii < hash_bulk_move && expanding; ++ii) {
-            item *it, *next;
+            item_metadata *it, *next;
             int bucket;
             void *item_lock = NULL;
 
@@ -226,7 +226,7 @@ static void *assoc_maintenance_thread(void *arg) {
             if ((item_lock = item_trylock(expand_bucket))) {
                     for (it = old_hashtable[expand_bucket]; NULL != it; it = next) {
                         next = it->h_next;
-                        bucket = hash(ITEM_key(it), it->nkey) & hashmask(hashpower);
+                        bucket = hash(ITEM_key(it->item), it->item->nkey) & hashmask(hashpower);
                         it->h_next = primary_hashtable[bucket];
                         primary_hashtable[bucket] = it;
                     }

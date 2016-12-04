@@ -340,6 +340,7 @@ item_metadata *do_item_alloc(char *key, const size_t nkey, const unsigned int fl
 
     DEBUG_REFCNT(it, '*');
     it->it_flags |= settings.use_cas ? ITEM_CAS : 0;
+    it->item->it_data_flags |= settings.use_cas ? ITEM_CAS : 0;
     it->item->nkey = nkey;
     it->item->nbytes = nbytes;
     memcpy(ITEM_key(it->item), key, nkey);
@@ -915,10 +916,44 @@ item_metadata *do_item_get(const char *key, const size_t nkey, const uint32_t hv
 
 item_metadata *do_item_touch(const char *key, size_t nkey, uint32_t exptime,
                     const uint32_t hv, conn *c) {
-	item_metadata *it = do_item_get(key, nkey, hv, c);
-    if (it != NULL) {
-        it->item->exptime = exptime;
+	item_metadata *it = NULL;
+	item_metadata *new_it = NULL;
+	item_metadata *old_it = do_item_get(key, nkey, hv, c);
+    if (old_it != NULL) {
+    	enum store_item_type stored = NOT_STORED;
+    	int failed_alloc = 0;
+		/* we have it and old_it here - alloc memory to hold both */
+		/* flags was already lost - so recover them from ITEM_suffix(it) */
+
+    	uint32_t flags = (uint32_t) strtoul(ITEM_suffix(old_it->item), (char **) NULL, 10);
+
+    	new_it = do_item_alloc(ITEM_key(old_it->item), nkey, flags, exptime, old_it->item->nbytes);
+
+		if (new_it == NULL) {
+			failed_alloc = 1;
+			stored = NOT_STORED;
+		} else {
+			/* copy data from old_it to new_it */
+			memcpy(ITEM_data(new_it->item), ITEM_data(old_it->item), old_it->item->nbytes);
+
+			it = new_it;
+		}
+
+        if (stored == NOT_STORED && failed_alloc == 0) {
+            if (old_it != NULL)
+                item_replace(old_it, it, hv);
+
+            c->cas = ITEM_get_cas(it->item);
+
+            stored = STORED;
+        }
     }
+
+    if (old_it != NULL)
+        do_item_remove(old_it);         /* release our reference */
+    if (new_it != NULL)
+        do_item_remove(new_it);
+
     return it;
 }
 

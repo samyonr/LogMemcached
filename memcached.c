@@ -3325,14 +3325,12 @@ static void process_touch_command(conn *c, token_t *tokens, const size_t ntokens
 
     it = item_touch(key, nkey, realtime(exptime_int), c);
     if (it) {
-        item_update(it);
         pthread_mutex_lock(&c->thread->stats.mutex);
         c->thread->stats.touch_cmds++;
         c->thread->stats.slab_stats[ITEM_clsid(it)].touch_hits++;
         pthread_mutex_unlock(&c->thread->stats.mutex);
 
         out_string(c, "TOUCHED");
-        item_remove(it);
     } else {
         pthread_mutex_lock(&c->thread->stats.mutex);
         c->thread->stats.touch_cmds++;
@@ -3457,22 +3455,7 @@ enum delta_result_type do_add_delta(conn *c, const char *key, const size_t nkey,
 
     snprintf(buf, INCR_MAX_STORAGE_LEN, "%llu", (unsigned long long)value);
     res = strlen(buf);
-    /* refcount == 2 means we are the only ones holding the item, and it is
-     * linked. We hold the item's lock in this function, so refcount cannot
-     * increase. */
-    if (res + 2 <= it->item->nbytes && it->refcount == 2) { /* replace in-place */
-        /* When changing the value without replacing the item, we
-           need to update the CAS on the existing item. */
-        /* We also need to fiddle it in the sizes tracker in case the tracking
-         * was enabled at runtime, since it relies on the CAS value to know
-         * whether to remove an item or not. */
-        item_stats_sizes_remove(it);
-        ITEM_set_cas(it->item, (settings.use_cas) ? get_cas_id() : 0);
-        item_stats_sizes_add(it);
-        memcpy(ITEM_data(it->item), buf, res);
-        memset(ITEM_data(it->item) + res, ' ', it->item->nbytes - res - 2);
-        do_item_update(it);
-    } else if (it->refcount > 1) {
+    if (it->refcount > 1) {
     	item_metadata *new_it;
         uint32_t flags = (uint32_t) strtoul(ITEM_suffix(it->item)+1, (char **) NULL, 10);
         new_it = do_item_alloc(ITEM_key(it->item), it->item->nkey, flags, it->item->exptime, res + 2);

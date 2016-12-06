@@ -419,9 +419,8 @@ typedef struct _stritem_data {
  * Structure for storing items within memcached.
  */
 typedef struct _stritem_metadata {
-    /* Protected by LRU locks */
-    struct _stritem_metadata *next;
-    struct _stritem_metadata *prev;
+    struct _stritem_metadata *next_free;
+    struct _stritem_metadata *prev_free;
     /* Rest are protected by an item lock */
     struct _stritem_metadata *h_next;    /* hash chain next */
     rel_time_t      time;       /* least recent access */

@@ -54,8 +54,6 @@ typedef struct {
     rel_time_t evicted_time;
 } itemstats_t;
 
-static item_metadata *heads[LARGEST_ID];
-static item_metadata *tails[LARGEST_ID];
 static itemstats_t itemstats[LARGEST_ID];
 static unsigned int sizes[LARGEST_ID];
 static uint64_t sizes_bytes[LARGEST_ID];
@@ -94,13 +92,14 @@ void freelist_init(const size_t limit) {
         it = (item_metadata *)ptr;
 		it->it_flags = ITEM_SLABBED;
 		it->slabs_clsid = 0;
+		it->get_count = 0;
 		if (x == 0) { // first item
-			it->prev = 0;
-			it->next = 0;
+			it->prev_free = 0;
+			it->next_free = 0;
 		} else {
-			it->prev = 0;
-			it->next = (item_metadata *)(ptr - sizeof(item_metadata));
-			if (it->next) it->next->prev = it;
+			it->prev_free = 0;
+			it->next_free = (item_metadata *)(ptr - sizeof(item_metadata));
+			if (it->next_free) it->next_free->prev_free = it;
 		}
 		first_free_freelist_item = it;
         ptr += sizeof(item_metadata);
@@ -119,12 +118,14 @@ static void *do_freelist_alloc(void) {
 
 	/* return off our freelist */
 	it = (item_metadata *)first_free_freelist_item;
-	first_free_freelist_item = it->next;
-	if (it->next) it->next->prev = 0;
+	first_free_freelist_item = it->next_free;
+	if (it->next_free) it->next_free->prev_free = 0;
 	/* Kill flag and initialize refcount here for lock safety in slab
 	 * mover's freeness detection. */
 	it->it_flags &= ~ITEM_SLABBED;
 	it->refcount = 1;
+	it->slabs_clsid = 1;
+	it->get_count = 0;
 	ret = (void *)it;
 
     return ret;
@@ -153,9 +154,9 @@ static void do_freelist_free(void *ptr, const size_t size, unsigned int id) {
     it = (item_metadata *)ptr;
 	it->it_flags = ITEM_SLABBED;
 	it->slabs_clsid = 0;
-	it->prev = 0;
-	it->next = first_free_freelist_item;
-	if (it->next) it->next->prev = it;
+	it->prev_free = 0;
+	it->next_free = first_free_freelist_item;
+	if (it->next_free) it->next_free->prev_free = it;
 	first_free_freelist_item = it;
 
     return;
@@ -329,7 +330,7 @@ item_metadata *do_item_alloc(char *key, const size_t nkey, const unsigned int fl
     //assert(it != heads[id]);
 
     /* Refcount is seeded to 1 by slabs_alloc() */
-    it->next = it->prev = 0;
+    it->next_free = it->prev_free = 0;
 
     /* Items are initially loaded into the HOT_LRU. This is '0' but I want at
      * least a note here. Compiler (hopefully?) optimizes this out.
@@ -365,8 +366,6 @@ void item_free(item_metadata *it) {
     size_t ntotal = ITEM_ntotal(it->item);
     unsigned int clsid;
     assert((it->it_flags & ITEM_LINKED) == 0);
-    assert(it != heads[it->slabs_clsid]);
-    assert(it != tails[it->slabs_clsid]);
     assert(it->refcount == 0);
 
     /* so slab size changer can tell later if item is already free or not */
@@ -401,18 +400,7 @@ bool item_size_ok(const size_t nkey, const int flags, const int nbytes) {
 }
 
 static void do_item_link_q(item_metadata *it) { /* item is the new head */
-	item_metadata **head, **tail;
     assert((it->it_flags & ITEM_SLABBED) == 0);
-
-    head = &heads[it->slabs_clsid];
-    tail = &tails[it->slabs_clsid];
-    assert(it != *head);
-    assert((*head && *tail) || (*head == 0 && *tail == 0));
-    it->prev = 0;
-    it->next = *head;
-    if (it->next) it->next->prev = it;
-    *head = it;
-    if (*tail == 0) *tail = it;
     sizes[it->slabs_clsid]++;
     sizes_bytes[it->slabs_clsid] += it->item->nbytes;
     return;
@@ -425,23 +413,6 @@ static void item_link_q(item_metadata *it) {
 }
 
 static void do_item_unlink_q(item_metadata *it) {
-	item_metadata **head, **tail;
-    head = &heads[it->slabs_clsid];
-    tail = &tails[it->slabs_clsid];
-
-    if (*head == it) {
-        assert(it->prev == 0);
-        *head = it->next;
-    }
-    if (*tail == it) {
-        assert(it->next == 0);
-        *tail = it->prev;
-    }
-    assert(it->next != it);
-    assert(it->prev != it);
-
-    if (it->next) it->next->prev = it->prev;
-    if (it->prev) it->prev->next = it->next;
     sizes[it->slabs_clsid]--;
     sizes_bytes[it->slabs_clsid] -= it->item->nbytes;
     return;
@@ -574,54 +545,7 @@ int do_item_replace(item_metadata *it, item_metadata *new_it, const uint32_t hv)
  * FIXME: only dumps the hot LRU with the new LRU's.
  */
 char *item_cachedump(const unsigned int slabs_clsid, const unsigned int limit, unsigned int *bytes) {
-    unsigned int memlimit = 2 * 1024 * 1024;   /* 2MB max response size */
-    char *buffer;
-    unsigned int bufcurr;
-    item_metadata *it;
-    unsigned int len;
-    unsigned int shown = 0;
-    char key_temp[KEY_MAX_LENGTH + 1];
-    char temp[512];
-    unsigned int id = slabs_clsid;
-    if (!settings.lru_maintainer_thread)
-        id |= COLD_LRU;
-
-    pthread_mutex_lock(&lru_locks[id]);
-    it = heads[id];
-
-    buffer = malloc((size_t)memlimit);
-    if (buffer == 0) {
-        return NULL;
-    }
-    bufcurr = 0;
-
-    while (it != NULL && (limit == 0 || shown < limit)) {
-        assert(it->item->nkey <= KEY_MAX_LENGTH);
-        if (it->item->nbytes == 0 && it->item->nkey == 0) {
-            it = it->next;
-            continue;
-        }
-        /* Copy the key since it may not be null-terminated in the struct */
-        strncpy(key_temp, ITEM_key(it->item), it->item->nkey);
-        key_temp[it->item->nkey] = 0x00; /* terminate */
-        len = snprintf(temp, sizeof(temp), "ITEM %s [%d b; %lu s]\r\n",
-                       key_temp, it->item->nbytes - 2,
-                       it->item->exptime == 0 ? 0 :
-                       (unsigned long)it->item->exptime + process_started);
-        if (bufcurr + len + 6 > memlimit)  /* 6 is END\r\n\0 */
-            break;
-        memcpy(buffer + bufcurr, temp, len);
-        bufcurr += len;
-        shown++;
-        it = it->next;
-    }
-
-    memcpy(buffer + bufcurr, "END\r\n", 6);
-    bufcurr += 5;
-
-    *bytes = bufcurr;
-    pthread_mutex_unlock(&lru_locks[id]);
-    return buffer;
+    return NULL;
 }
 
 void item_stats_totals(ADD_STAT add_stats, void *c) {
@@ -707,8 +631,6 @@ void item_stats(ADD_STAT add_stats, void *c) {
             totals.direct_reclaims += itemstats[i].direct_reclaims;
             size += sizes[i];
             lru_size_map[x] = sizes[i];
-            if (lru_type_map[x] == COLD_LRU && tails[i] != NULL)
-                age = current_time - tails[i]->time;
             pthread_mutex_unlock(&lru_locks[i]);
         }
         if (size == 0)
@@ -1021,151 +943,7 @@ item_metadata *do_item_get_update(item_metadata *old_it, const uint32_t hv) {
  * Callable from worker threads or the LRU maintainer thread */
 static int lru_pull_tail(const int orig_id, const int cur_lru,
         const uint64_t total_bytes, uint8_t flags) {
-	item_metadata *it = NULL;
-    int id = orig_id;
-    int removed = 0;
-    if (id == 0)
-        return 0;
-
-    int tries = 5;
-    item_metadata *search;
-    item_metadata *next_it;
-    void *hold_lock = NULL;
-    unsigned int move_to_lru = 0;
-    uint64_t limit = 0;
-
-    id |= cur_lru;
-    pthread_mutex_lock(&lru_locks[id]);
-    search = tails[id];
-    /* We walk up *only* for locked items, and if bottom is expired. */
-    for (; tries > 0 && search != NULL; tries--, search=next_it) {
-        /* we might relink search mid-loop, so search->prev isn't reliable */
-        next_it = search->prev;
-        if (search->item->nbytes == 0 && search->item->nkey == 0 && search->it_flags == 1) {
-            /* We are a crawler, ignore it. */
-            if (flags & LRU_PULL_CRAWL_BLOCKS) {
-                pthread_mutex_unlock(&lru_locks[id]);
-                return 0;
-            }
-            tries++;
-            continue;
-        }
-        uint32_t hv = hash(ITEM_key(search->item), search->item->nkey);
-        /* Attempt to hash item lock the "search" item. If locked, no
-         * other callers can incr the refcount. Also skip ourselves. */
-        if ((hold_lock = item_trylock(hv)) == NULL)
-            continue;
-        /* Now see if the item is refcount locked */
-        if (refcount_incr(&search->refcount) != 2) {
-            /* Note pathological case with ref'ed items in tail.
-             * Can still unlink the item, but it won't be reusable yet */
-            itemstats[id].lrutail_reflocked++;
-            /* In case of refcount leaks, enable for quick workaround. */
-            /* WARNING: This can cause terrible corruption */
-            if (settings.tail_repair_time &&
-                    search->time + settings.tail_repair_time < current_time) {
-                itemstats[id].tailrepairs++;
-                search->refcount = 1;
-                /* This will call item_remove -> item_free since refcnt is 1 */
-                do_item_unlink_nolock(search, hv);
-                item_trylock_unlock(hold_lock);
-                continue;
-            }
-        }
-
-        /* Expired or flushed */
-        if ((search->item->exptime != 0 && search->item->exptime < current_time)
-            || item_is_flushed(search)) {
-            itemstats[id].reclaimed++;
-            if ((search->it_flags & ITEM_FETCHED) == 0) {
-                itemstats[id].expired_unfetched++;
-            }
-            /* refcnt 2 -> 1 */
-            do_item_unlink_nolock(search, hv);
-            /* refcnt 1 -> 0 -> item_free */
-            do_item_remove(search);
-            item_trylock_unlock(hold_lock);
-            removed++;
-
-            /* If all we're finding are expired, can keep going */
-            continue;
-        }
-
-        /* If we're HOT_LRU or WARM_LRU and over size limit, send to COLD_LRU.
-         * If we're COLD_LRU, send to WARM_LRU unless we need to evict
-         */
-        switch (cur_lru) {
-            case HOT_LRU:
-                limit = total_bytes * settings.hot_lru_pct / 100;
-            case WARM_LRU:
-                if (limit == 0)
-                    limit = total_bytes * settings.warm_lru_pct / 100;
-                if (sizes_bytes[id] > limit) {
-                    itemstats[id].moves_to_cold++;
-                    move_to_lru = COLD_LRU;
-                    do_item_unlink_q(search);
-                    it = search;
-                    removed++;
-                    break;
-                } else if ((search->it_flags & ITEM_ACTIVE) != 0) {
-                    /* Only allow ACTIVE relinking if we're not too large. */
-                    itemstats[id].moves_within_lru++;
-                    search->it_flags &= ~ITEM_ACTIVE;
-                    do_item_update_nolock(search);
-                    do_item_remove(search);
-                    item_trylock_unlock(hold_lock);
-                } else {
-                    /* Don't want to move to COLD, not active, bail out */
-                    it = search;
-                }
-                break;
-            case COLD_LRU:
-                it = search; /* No matter what, we're stopping */
-                if (flags & LRU_PULL_EVICT) {
-                    if (settings.evict_to_free == 0) {
-                        /* Don't think we need a counter for this. It'll OOM.  */
-                        break;
-                    }
-                    itemstats[id].evicted++;
-                    itemstats[id].evicted_time = current_time - search->time;
-                    if (search->item->exptime != 0)
-                        itemstats[id].evicted_nonzero++;
-                    if ((search->it_flags & ITEM_FETCHED) == 0) {
-                        itemstats[id].evicted_unfetched++;
-                    }
-                    LOGGER_LOG(NULL, LOG_EVICTIONS, LOGGER_EVICTION, search);
-                    do_item_unlink_nolock(search, hv);
-                    removed++;
-                    if (settings.slab_automove == 2) {
-                        //slabs_reassign(-1, orig_id);
-                    }
-                } else if ((search->it_flags & ITEM_ACTIVE) != 0
-                        && settings.lru_maintainer_thread) {
-                    itemstats[id].moves_to_warm++;
-                    search->it_flags &= ~ITEM_ACTIVE;
-                    move_to_lru = WARM_LRU;
-                    do_item_unlink_q(search);
-                    removed++;
-                }
-                break;
-        }
-        if (it != NULL)
-            break;
-    }
-
-    pthread_mutex_unlock(&lru_locks[id]);
-
-    if (it != NULL) {
-        if (move_to_lru) {
-            it->slabs_clsid = ITEM_clsid(it);
-            it->slabs_clsid |= move_to_lru;
-            item_link_q(it);
-        }
-        do_item_remove(it);
-        item_trylock_unlock(hold_lock);
-    }
-
-    return removed;
+    return 0;
 }
 
 /* Loop up to N times:
@@ -1402,99 +1180,15 @@ int init_lru_maintainer(void) {
 
 /* Tail linkers and crawler for the LRU crawler. */
 void do_item_linktail_q(item_metadata *it) { /* item is the new tail */
-	item_metadata **head, **tail;
-    assert(it->it_flags == 1);
-    assert(it->item->nbytes == 0);
-
-    head = &heads[it->slabs_clsid];
-    tail = &tails[it->slabs_clsid];
-    //assert(*tail != 0);
-    assert(it != *tail);
-    assert((*head && *tail) || (*head == 0 && *tail == 0));
-    it->prev = *tail;
-    it->next = 0;
-    if (it->prev) {
-        assert(it->prev->next == 0);
-        it->prev->next = it;
-    }
-    *tail = it;
-    if (*head == 0) *head = it;
     return;
 }
 
 void do_item_unlinktail_q(item_metadata *it) {
-	item_metadata **head, **tail;
-    head = &heads[it->slabs_clsid];
-    tail = &tails[it->slabs_clsid];
-
-    if (*head == it) {
-        assert(it->prev == 0);
-        *head = it->next;
-    }
-    if (*tail == it) {
-        assert(it->next == 0);
-        *tail = it->prev;
-    }
-    assert(it->next != it);
-    assert(it->prev != it);
-
-    if (it->next) it->next->prev = it->prev;
-    if (it->prev) it->prev->next = it->next;
     return;
 }
 
 /* This is too convoluted, but it's a difficult shuffle. Try to rewrite it
  * more clearly. */
 item_metadata *do_item_crawl_q(item_metadata *it) {
-	item_metadata **head, **tail;
-    assert(it->it_flags == 1);
-    assert(it->item->nbytes == 0);
-    head = &heads[it->slabs_clsid];
-    tail = &tails[it->slabs_clsid];
-
-    /* We've hit the head, pop off */
-    if (it->prev == 0) {
-        assert(*head == it);
-        if (it->next) {
-            *head = it->next;
-            assert(it->next->prev == it);
-            it->next->prev = 0;
-        }
-        return NULL; /* Done */
-    }
-
-    /* Swing ourselves in front of the next item */
-    /* NB: If there is a prev, we can't be the head */
-    assert(it->prev != it);
-    if (it->prev) {
-        if (*head == it->prev) {
-            /* Prev was the head, now we're the head */
-            *head = it;
-        }
-        if (*tail == it) {
-            /* We are the tail, now they are the tail */
-            *tail = it->prev;
-        }
-        assert(it->next != it);
-        if (it->next) {
-            assert(it->prev->next == it);
-            it->prev->next = it->next;
-            it->next->prev = it->prev;
-        } else {
-            /* Tail. Move this above? */
-            it->prev->next = 0;
-        }
-        /* prev->prev's next is it->prev */
-        it->next = it->prev;
-        it->prev = it->next->prev;
-        it->next->prev = it;
-        /* New it->prev now, if we're not at the head. */
-        if (it->prev) {
-            it->prev->next = it;
-        }
-    }
-    assert(it->next != it);
-    assert(it->prev != it);
-
-    return it->next; /* success */
+    return NULL; /* success */
 }

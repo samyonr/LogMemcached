@@ -387,9 +387,10 @@ extern struct settings settings;
 #define ITEM_FETCHED 8
 /* Appended on fetch, removed on LRU shuffling */
 #define ITEM_ACTIVE 16
-/* If an item's storage are chained chunks. */
-#define ITEM_TODEFINE1 32
-#define ITEM_CHUNK 64
+
+#define ITEM_DIRTY		32
+#define ITEM_CORRUPTED	64
+#define ITEM_DELETED	128
 
 /**
  * Structure for storing items within memcached.

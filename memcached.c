@@ -2543,6 +2543,7 @@ enum store_item_type do_store_item(item_metadata *it, int comm, conn *c, const u
 
     if (stored == STORED) {
         c->cas = ITEM_get_cas(it->item);
+        it->item->it_data_flags &= ~ITEM_DIRTY;
     }
     LOGGER_LOG(c->thread->l, LOG_MUTATIONS, LOGGER_ITEM_STORE, NULL,
             stored, comm, ITEM_key(it->item), it->item->nkey);
@@ -3528,6 +3529,7 @@ static void process_delete_command(conn *c, token_t *tokens, const size_t ntoken
         c->thread->stats.slab_stats[ITEM_clsid(it)].delete_hits++;
         pthread_mutex_unlock(&c->thread->stats.mutex);
 
+        do_item_alloc(key, nkey, ITEM_DELETED, 0, 2);
         item_unlink(it);
         item_remove(it);      /* release our reference */
         out_string(c, "DELETED");

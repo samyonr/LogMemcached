@@ -296,12 +296,20 @@ item_metadata *do_item_alloc(char *key, const size_t nkey, const unsigned int fl
                 if (lru_pull_tail(id, COLD_LRU, 0, LRU_PULL_EVICT) <= 0)
                     break;
             }
-        } else {
-        	it = freelist_alloc();
-        	// if there was a place for it_data, there should be also a place for item's metadata
-        	assert(it != NULL);
-        	it->item = it_data;
-            break;
+        } else if ((flags & ITEM_DELETED) != 0) {
+        	it_data->it_data_flags |= ITEM_DELETED;
+        	it_data->nkey = nkey;
+        	it_data->nbytes = nbytes;
+			memcpy(ITEM_key(it_data), key, nkey);
+			memcpy(ITEM_suffix(it_data), suffix, (size_t)nsuffix);
+			it_data->nsuffix = nsuffix;
+			return NULL;
+        } else { // it_data allocated and it's not a delete item
+			it = freelist_alloc();
+			// if there was a place for it_data, there should be also a place for item's metadata
+			assert(it != NULL);
+			it->item = it_data;
+			break;
         }
     }
 
@@ -341,6 +349,7 @@ item_metadata *do_item_alloc(char *key, const size_t nkey, const unsigned int fl
     DEBUG_REFCNT(it, '*');
     it->it_flags |= settings.use_cas ? ITEM_CAS : 0;
     it->item->it_data_flags |= settings.use_cas ? ITEM_CAS : 0;
+	it->item->it_data_flags |= ITEM_DIRTY;
     it->item->nkey = nkey;
     it->item->nbytes = nbytes;
     memcpy(ITEM_key(it->item), key, nkey);

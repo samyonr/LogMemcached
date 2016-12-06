@@ -370,6 +370,8 @@ struct settings {
     int idle_timeout;       /* Number of seconds to let connections idle */
     unsigned int logger_watcher_buf_size; /* size of logger's per-watcher buffer */
     unsigned int logger_buf_size; /* size of per-thread logger buffer */
+    bool lru_log_enabled; /* enabling replicating item to the end of the log on GET requests */
+    unsigned int lru_log_get_count; /* after how many get requests to replicates */
 };
 
 extern struct stats stats;
@@ -426,6 +428,7 @@ typedef struct _stritem_metadata {
     unsigned short  refcount;
     uint8_t         it_flags;   /* ITEM_* above */
     uint8_t         slabs_clsid;/* which slab class we're in */
+    unsigned int	get_count; /* how many GETs got the item */
     item_data		*item;
 } item_metadata;
 
@@ -647,6 +650,7 @@ void  conn_close_idle(conn *c);
 item_metadata *item_alloc(char *key, size_t nkey, int flags, rel_time_t exptime, int nbytes);
 item_metadata *item_get(const char *key, const size_t nkey, conn *c);
 item_metadata *item_touch(const char *key, const size_t nkey, uint32_t exptime, conn *c);
+item_metadata *item_get_update(item_metadata *item);
 int   item_link(item_metadata *it);
 void  item_remove(item_metadata *it);
 int   item_replace(item_metadata *it, item_metadata *new_it, const uint32_t hv);

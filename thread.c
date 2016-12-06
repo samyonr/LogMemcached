@@ -622,6 +622,14 @@ void item_update(item_metadata *item) {
     item_unlock(hv);
 }
 
+item_metadata *item_get_update(item_metadata *item) {
+	item_metadata *it;
+	uint32_t hv;
+	hv = hash(ITEM_key(item->item), item->item->nkey);
+	// do_item_get_update handles its own locks
+    it = do_item_get_update(item, hv);
+    return it;
+}
 /*
  * Does arithmetic on a numeric item value.
  */

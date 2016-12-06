@@ -245,6 +245,8 @@ static void settings_init(void) {
     settings.crawls_persleep = 1000;
     settings.logger_watcher_buf_size = LOGGER_WATCHER_BUF_SIZE;
     settings.logger_buf_size = LOGGER_BUF_SIZE;
+    settings.lru_log_enabled = false;
+    settings.lru_log_get_count = 0;
 }
 
 /*
@@ -2839,6 +2841,8 @@ static void process_stat_settings(ADD_STAT add_stats, void *c) {
     APPEND_STAT("watcher_logbuf_size", "%u", settings.logger_watcher_buf_size);
     APPEND_STAT("worker_logbuf_size", "%u", settings.logger_buf_size);
     APPEND_STAT("track_sizes", "%s", item_stats_sizes_status() ? "yes" : "no");
+    APPEND_STAT("lru_log_enabled", "%s", settings.lru_log_enabled ? "yes" : "no");
+    APPEND_STAT("lru_log_get_count", "%lu", (unsigned long)settings.lru_log_get_count);
 }
 
 static void conn_to_str(const conn *c, char *buf) {
@@ -5083,6 +5087,7 @@ static void usage(void) {
            "                read by background thread. Which is then written to watchers.\n"
            "              - modern: Enables 'modern' defaults. See release notes (higly recommended!).\n"
            "              - track_sizes: Enable dynamic reports for 'stats sizes' command.\n"
+    	   "			  - lru_log_get_count: Set after how many GET requests to replicate the item.\n"
            );
     return;
 }
@@ -5380,7 +5385,8 @@ int main (int argc, char **argv) {
         SLAB_SIZES,
         SLAB_CHUNK_MAX,
         TRACK_SIZES,
-        MODERN
+        MODERN,
+		LRU_LOG_GET_COUNT
     };
     char *const subopts_tokens[] = {
         [MAXCONNS_FAST] = "maxconns_fast",
@@ -5403,6 +5409,7 @@ int main (int argc, char **argv) {
         [SLAB_CHUNK_MAX] = "slab_chunk_max",
         [TRACK_SIZES] = "track_sizes",
         [MODERN] = "modern",
+		[LRU_LOG_GET_COUNT] = "lru_log_get_count",
         NULL
     };
 
@@ -5832,6 +5839,15 @@ int main (int argc, char **argv) {
                 start_lru_crawler = true;
                 start_lru_maintainer = true;
                 break;
+            case LRU_LOG_GET_COUNT:
+                if (subopts_value == NULL) {
+                    fprintf(stderr, "Missing lru_log_get_count argument\n");
+                }
+                if (!safe_strtoul(subopts_value, &settings.lru_log_get_count)) {
+                    fprintf(stderr, "could not parse argument to lru_log_get_count\n");
+                }
+            	settings.lru_log_enabled = true;
+            	break;
             default:
                 printf("Illegal suboption \"%s\"\n", subopts_value);
                 return 1;

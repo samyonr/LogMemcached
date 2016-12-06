@@ -539,6 +539,15 @@ void do_item_update(item_metadata *it) {
 
         if ((it->it_flags & ITEM_LINKED) != 0) {
             it->time = current_time;
+            if (settings.lru_log_enabled) {
+            	if (it->get_count >= settings.lru_log_get_count) {
+					if ((it = item_get_update(it)) != NULL) {
+						it->get_count = 0;
+					}
+            	} else {
+            		it->get_count++;
+            	}
+            }
             if (!settings.lru_maintainer_thread) {
                 item_unlink_q(it);
                 item_link_q(it);
@@ -931,7 +940,7 @@ item_metadata *do_item_touch(const char *key, size_t nkey, uint32_t exptime,
     if (old_it != NULL) {
     	enum store_item_type stored = NOT_STORED;
     	int failed_alloc = 0;
-		/* we have it and old_it here - alloc memory to hold both */
+		/* we have old_it here - alloc memory to hold new_it */
 		/* flags was already lost - so recover them from ITEM_suffix(it) */
 
     	uint32_t flags = (uint32_t) strtoul(ITEM_suffix(old_it->item), (char **) NULL, 10);
@@ -953,6 +962,46 @@ item_metadata *do_item_touch(const char *key, size_t nkey, uint32_t exptime,
                 item_replace(old_it, it, hv);
 
             c->cas = ITEM_get_cas(it->item);
+
+            stored = STORED;
+        }
+    }
+
+    if (old_it != NULL)
+        do_item_remove(old_it);         /* release our reference */
+    if (new_it != NULL)
+        do_item_remove(new_it);
+
+    return it;
+}
+
+item_metadata *do_item_get_update(item_metadata *old_it, const uint32_t hv) {
+	item_metadata *it = NULL;
+	item_metadata *new_it = NULL;
+    if (old_it != NULL) {
+    	enum store_item_type stored = NOT_STORED;
+    	int failed_alloc = 0;
+		/* we have old_it here - alloc memory to hold new_it */
+		/* flags was already lost - so recover them from ITEM_suffix(it) */
+
+    	uint32_t flags = (uint32_t) strtoul(ITEM_suffix(old_it->item), (char **) NULL, 10);
+
+    	new_it = do_item_alloc(ITEM_key(old_it->item), old_it->item->nkey, flags, old_it->item->exptime, old_it->item->nbytes);
+
+		if (new_it == NULL) {
+			failed_alloc = 1;
+			stored = NOT_STORED;
+		} else {
+			/* copy data from old_it to new_it */
+			memcpy(ITEM_data(new_it->item), ITEM_data(old_it->item), old_it->item->nbytes);
+			it = new_it;
+		}
+
+        if (stored == NOT_STORED && failed_alloc == 0) {
+            if (old_it != NULL)
+                item_replace(old_it, it, hv);
+
+            //c->cas = ITEM_get_cas(it->item);
 
             stored = STORED;
         }

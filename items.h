@@ -51,6 +51,7 @@ bool item_stats_sizes_status(void);
 
 item_metadata *do_item_get(const char *key, const size_t nkey, const uint32_t hv, conn *c);
 item_metadata *do_item_touch(const char *key, const size_t nkey, uint32_t exptime, const uint32_t hv, conn *c);
+item_metadata *do_item_get_update(item_metadata *old_it, const uint32_t hv);
 void item_stats_reset(void);
 extern pthread_mutex_t lru_locks[POWER_LARGEST];
 

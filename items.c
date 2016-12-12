@@ -63,7 +63,6 @@ static int stats_sizes_buckets = 0;
 
 static volatile int do_run_lru_maintainer_thread = 0;
 static int lru_maintainer_initialized = 0;
-static int lru_maintainer_check_clsid = 0;
 static pthread_mutex_t lru_maintainer_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t cas_id_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t stats_sizes_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -182,9 +181,6 @@ void do_item_stats_add_crawl(const int i, const uint64_t reclaimed,
 #define LRU_PULL_EVICT 1
 #define LRU_PULL_CRAWL_BLOCKS 2
 
-static int lru_pull_tail(const int orig_id, const int cur_lru,
-        const uint64_t total_bytes, uint8_t flags);
-
 /* Get the next CAS id for a new item. */
 /* TODO: refactor some atomics for this. */
 uint64_t get_cas_id(void) {
@@ -208,15 +204,6 @@ int item_is_flushed(item_metadata *it) {
     return 0;
 }
 
-static unsigned int noexp_lru_size(int slabs_clsid) {
-    int id = CLEAR_LRU(slabs_clsid);
-    id |= NOEXP_LRU;
-    unsigned int ret;
-    pthread_mutex_lock(&lru_locks[id]);
-    ret = sizes_bytes[id];
-    pthread_mutex_unlock(&lru_locks[id]);
-    return ret;
-}
 
 /* Enable this for reference-count debugging. */
 #if 0
@@ -241,7 +228,7 @@ static unsigned int noexp_lru_size(int slabs_clsid) {
  *
  * Returns the total size of the header.
  */
-static size_t item_make_header(const uint8_t nkey, const unsigned int flags, const int nbytes,
+size_t item_make_header(const uint8_t nkey, const unsigned int flags, const int nbytes,
                      char *suffix, uint8_t *nsuffix) {
     /* suffix is defined at 40 chars elsewhere.. */
     *nsuffix = (uint8_t) snprintf(suffix, 40, " %u %d\r\n", flags, nbytes - 2);
@@ -249,7 +236,7 @@ static size_t item_make_header(const uint8_t nkey, const unsigned int flags, con
 }
 
 item_metadata *do_item_alloc(char *key, const size_t nkey, const unsigned int flags,
-                    const rel_time_t exptime, const int nbytes) {
+                    const rel_time_t exptime, const int nbytes, bool *succeed) {
     int i;
     uint8_t nsuffix;
     item_metadata *it = NULL;
@@ -262,41 +249,12 @@ item_metadata *do_item_alloc(char *key, const size_t nkey, const unsigned int fl
 
     unsigned int id = 1;
 
-    /* If no memory is available, attempt a direct LRU juggle/eviction */
-    /* This is a race in order to simplify lru_pull_tail; in cases where
-     * locked items are on the tail, you want them to fall out and cause
-     * occasional OOM's, rather than internally work around them.
-     * This also gives one fewer code path for slab alloc/free
-     */
-    /* TODO: if power_largest, try a lot more times? or a number of times
-     * based on how many chunks the new object should take up?
-     * or based on the size of an object lru_pull_tail() says it evicted?
-     * This is a classical GC problem if "large items" are of too varying of
-     * sizes. This is actually okay here since the larger the data, the more
-     * bandwidth it takes, the more time we can loop in comparison to serving
-     * and replacing small items.
-     */
-    for (i = 0; i < 10; i++) {
+    for (i = 0; i < 3; i++) {
         uint64_t total_bytes;
-        /* Try to reclaim memory first */
-        if (!settings.lru_maintainer_thread) {
-            lru_pull_tail(id, COLD_LRU, 0, 0);
-        }
         it_data = memlog_alloc(ntotal, &total_bytes, 0);
 
-        if (settings.expirezero_does_not_evict)
-            total_bytes -= noexp_lru_size(id);
-
         if (it_data == NULL) {
-            if (settings.lru_maintainer_thread) {
-                lru_pull_tail(id, HOT_LRU, total_bytes, 0);
-                lru_pull_tail(id, WARM_LRU, total_bytes, 0);
-                if (lru_pull_tail(id, COLD_LRU, total_bytes, LRU_PULL_EVICT) <= 0)
-                    break;
-            } else {
-                if (lru_pull_tail(id, COLD_LRU, 0, LRU_PULL_EVICT) <= 0)
-                    break;
-            }
+        	usleep(1);
         } else if ((flags & ITEM_DELETED) != 0) {
         	it_data->it_data_flags |= ITEM_DELETED;
         	it_data->nkey = nkey;
@@ -304,6 +262,9 @@ item_metadata *do_item_alloc(char *key, const size_t nkey, const unsigned int fl
 			memcpy(ITEM_key(it_data), key, nkey);
 			memcpy(ITEM_suffix(it_data), suffix, (size_t)nsuffix);
 			it_data->nsuffix = nsuffix;
+			if (succeed != NULL) {
+				*succeed = true;
+			}
 			return NULL;
         } else { // it_data allocated and it's not a delete item
 			it = freelist_alloc();
@@ -324,27 +285,16 @@ item_metadata *do_item_alloc(char *key, const size_t nkey, const unsigned int fl
         pthread_mutex_lock(&lru_locks[id]);
         itemstats[id].outofmemory++;
         pthread_mutex_unlock(&lru_locks[id]);
+        if (succeed != NULL) {
+        	*succeed = false;
+        }
         return NULL;
     }
 
-    //assert(it != heads[id]);
 
     /* Refcount is seeded to 1 by slabs_alloc() */
     it->next_free = it->prev_free = 0;
 
-    /* Items are initially loaded into the HOT_LRU. This is '0' but I want at
-     * least a note here. Compiler (hopefully?) optimizes this out.
-     */
-    if (settings.lru_maintainer_thread) {
-        if (exptime == 0 && settings.expirezero_does_not_evict) {
-            id |= NOEXP_LRU;
-        } else {
-            id |= HOT_LRU;
-        }
-    } else {
-        /* There is only COLD in compat-mode */
-        id |= COLD_LRU;
-    }
     it->slabs_clsid = id;
 
     DEBUG_REFCNT(it, '*');
@@ -358,7 +308,9 @@ item_metadata *do_item_alloc(char *key, const size_t nkey, const unsigned int fl
     memcpy(ITEM_suffix(it->item), suffix, (size_t)nsuffix);
     it->item->nsuffix = nsuffix;
     it->h_next = 0;
-
+    if (succeed != NULL) {
+    	*succeed = true;
+    }
     return it;
 }
 
@@ -841,7 +793,7 @@ item_metadata *do_item_get(const char *key, const size_t nkey, const uint32_t hv
             }
             was_found = 3;
         } else {
-            it->it_flags |= ITEM_FETCHED|ITEM_ACTIVE;
+            it->it_flags |= ITEM_FETCHED;
             DEBUG_REFCNT(it, '+');
         }
     }
@@ -867,7 +819,7 @@ item_metadata *do_item_touch(const char *key, size_t nkey, uint32_t exptime,
 
     	uint32_t flags = (uint32_t) strtoul(ITEM_suffix(old_it->item), (char **) NULL, 10);
 
-    	new_it = do_item_alloc(ITEM_key(old_it->item), nkey, flags, exptime, old_it->item->nbytes);
+    	new_it = do_item_alloc(ITEM_key(old_it->item), nkey, flags, exptime, old_it->item->nbytes, NULL);
 
 		if (new_it == NULL) {
 			failed_alloc = 1;
@@ -908,7 +860,7 @@ item_metadata *do_item_get_update(item_metadata *old_it, const uint32_t hv) {
 
     	uint32_t flags = (uint32_t) strtoul(ITEM_suffix(old_it->item), (char **) NULL, 10);
 
-    	new_it = do_item_alloc(ITEM_key(old_it->item), old_it->item->nkey, flags, old_it->item->exptime, old_it->item->nbytes);
+    	new_it = do_item_alloc(ITEM_key(old_it->item), old_it->item->nkey, flags, old_it->item->exptime, old_it->item->nbytes, NULL);
 
 		if (new_it == NULL) {
 			failed_alloc = 1;
@@ -939,139 +891,25 @@ item_metadata *do_item_get_update(item_metadata *old_it, const uint32_t hv) {
 
 /*** LRU MAINTENANCE THREAD ***/
 
-/* Returns number of items remove, expired, or evicted.
- * Callable from worker threads or the LRU maintainer thread */
-static int lru_pull_tail(const int orig_id, const int cur_lru,
-        const uint64_t total_bytes, uint8_t flags) {
-    return 0;
-}
 
-/* Loop up to N times:
- * If too many items are in HOT_LRU, push to COLD_LRU
- * If too many items are in WARM_LRU, push to COLD_LRU
- * If too many items are in COLD_LRU, poke COLD_LRU tail
- * 1000 loops with 1ms min sleep gives us under 1m items shifted/sec. The
- * locks can't handle much more than that. Leaving a TODO for how to
- * autoadjust in the future.
- */
-static int lru_maintainer_juggle(const int slabs_clsid) {
-    int i;
+static int lru_maintainer_free() {
     int did_moves = 0;
-    //bool mem_limit_reached = false;
-    uint64_t total_bytes = 0;
-    unsigned int chunks_perslab = 0;
-    unsigned int chunks_free = 0;
-    /* TODO: if free_chunks below high watermark, increase aggressiveness */
-    //chunks_free = slabs_available_chunks(slabs_clsid, &mem_limit_reached,
-    //        &total_bytes, &chunks_perslab);
-    if (settings.expirezero_does_not_evict)
-        total_bytes -= noexp_lru_size(slabs_clsid);
+    unsigned int freed = 0;
 
-    /* If slab automove is enabled on any level, and we have more than 2 pages
-     * worth of chunks free in this class, ask (gently) to reassign a page
-     * from this class back into the global pool (0)
-     */
-    if (settings.slab_automove > 0 && chunks_free > (chunks_perslab * 2.5)) {
-        //slabs_reassign(slabs_clsid, SLAB_GLOBAL_PAGE_POOL);
+    if ((get_memory_limit() / 4 >= get_memory_available()) && (get_memory_limit() / 4 >= get_memory_free_from_beginning())) {
+    	freed = memlog_clean();
+        if (settings.verbose > 2)
+            fprintf(stderr, "LRU freed %d bytes\n",freed);
+    	if (freed > 0) {
+    		did_moves++;
+    	}
     }
 
-    /* Juggle HOT/WARM up to N times */
-    for (i = 0; i < 1000; i++) {
-        int do_more = 0;
-        if (lru_pull_tail(slabs_clsid, HOT_LRU, total_bytes, LRU_PULL_CRAWL_BLOCKS) ||
-            lru_pull_tail(slabs_clsid, WARM_LRU, total_bytes, LRU_PULL_CRAWL_BLOCKS)) {
-            do_more++;
-        }
-        do_more += lru_pull_tail(slabs_clsid, COLD_LRU, total_bytes, LRU_PULL_CRAWL_BLOCKS);
-        if (do_more == 0)
-            break;
-        did_moves++;
-    }
     return did_moves;
 }
 
 /* Will crawl all slab classes a minimum of once per hour */
 #define MAX_MAINTCRAWL_WAIT 60 * 60
-
-/* Hoping user input will improve this function. This is all a wild guess.
- * Operation: Kicks crawler for each slab id. Crawlers take some statistics as
- * to items with nonzero expirations. It then buckets how many items will
- * expire per minute for the next hour.
- * This function checks the results of a run, and if it things more than 1% of
- * expirable objects are ready to go, kick the crawler again to reap.
- * It will also kick the crawler once per minute regardless, waiting a minute
- * longer for each time it has no work to do, up to an hour wait time.
- * The latter is to avoid newly started daemons from waiting too long before
- * retrying a crawl.
- */
-static void lru_maintainer_crawler_check(struct crawler_expired_data *cdata) {
-    int i;
-    static rel_time_t next_crawls[MAX_NUMBER_OF_SLAB_CLASSES];
-    static rel_time_t next_crawl_wait[MAX_NUMBER_OF_SLAB_CLASSES];
-    uint8_t todo[MAX_NUMBER_OF_SLAB_CLASSES];
-    memset(todo, 0, sizeof(uint8_t) * MAX_NUMBER_OF_SLAB_CLASSES);
-    bool do_run = false;
-    if (!cdata->crawl_complete) {
-        return;
-    }
-
-    for (i = POWER_SMALLEST; i < MAX_NUMBER_OF_SLAB_CLASSES; i++) {
-        crawlerstats_t *s = &cdata->crawlerstats[i];
-        /* We've not successfully kicked off a crawl yet. */
-        if (s->run_complete) {
-            pthread_mutex_lock(&cdata->lock);
-            int x;
-            /* Should we crawl again? */
-            uint64_t possible_reclaims = s->seen - s->noexp;
-            uint64_t available_reclaims = 0;
-            /* Need to think we can free at least 1% of the items before
-             * crawling. */
-            /* FIXME: Configurable? */
-            uint64_t low_watermark = (s->seen / 100) + 1;
-            rel_time_t since_run = current_time - s->end_time;
-            /* Don't bother if the payoff is too low. */
-            if (settings.verbose > 1)
-                fprintf(stderr, "maint crawler[%d]: low_watermark: %llu, possible_reclaims: %llu, since_run: %u\n",
-                        i, (unsigned long long)low_watermark, (unsigned long long)possible_reclaims,
-                        (unsigned int)since_run);
-            for (x = 0; x < 60; x++) {
-                available_reclaims += s->histo[x];
-                if (available_reclaims > low_watermark) {
-                    if (next_crawl_wait[i] < (x * 60)) {
-                        next_crawl_wait[i] += 60;
-                    } else if (next_crawl_wait[i] >= 60) {
-                        next_crawl_wait[i] -= 60;
-                    }
-                    break;
-                }
-            }
-
-            if (available_reclaims == 0) {
-                next_crawl_wait[i] += 60;
-            }
-
-            if (next_crawl_wait[i] > MAX_MAINTCRAWL_WAIT) {
-                next_crawl_wait[i] = MAX_MAINTCRAWL_WAIT;
-            }
-
-            next_crawls[i] = current_time + next_crawl_wait[i] + 5;
-            if (settings.verbose > 1)
-                fprintf(stderr, "maint crawler[%d]: next_crawl: %u, [%d] now: [%d]\n",
-                        i, next_crawl_wait[i], next_crawls[i], current_time);
-            // Got our calculation, avoid running until next actual run.
-            s->run_complete = false;
-            pthread_mutex_unlock(&cdata->lock);
-        }
-        if (current_time > next_crawls[i]) {
-            todo[i] = 1;
-            do_run = true;
-            next_crawls[i] = current_time + 5; // minimum retry wait.
-        }
-    }
-    if (do_run) {
-        lru_crawler_start(todo, 0, CRAWLER_EXPIRED, cdata, NULL, 0);
-    }
-}
 
 static pthread_t lru_maintainer_tid;
 
@@ -1079,13 +917,8 @@ static pthread_t lru_maintainer_tid;
 #define MIN_LRU_MAINTAINER_SLEEP 1000
 
 static void *lru_maintainer_thread(void *arg) {
-    int i;
     useconds_t to_sleep = MIN_LRU_MAINTAINER_SLEEP;
     rel_time_t last_crawler_check = 0;
-    struct crawler_expired_data cdata;
-    memset(&cdata, 0, sizeof(struct crawler_expired_data));
-    pthread_mutex_init(&cdata.lock, NULL);
-    cdata.crawl_complete = true; // kick off the crawler.
 
     pthread_mutex_lock(&lru_maintainer_lock);
     if (settings.verbose > 2)
@@ -1096,19 +929,13 @@ static void *lru_maintainer_thread(void *arg) {
         usleep(to_sleep);
         pthread_mutex_lock(&lru_maintainer_lock);
 
-        STATS_LOCK();
-        stats.lru_maintainer_juggles++;
-        STATS_UNLOCK();
-        /* We were asked to immediately wake up and poke a particular slab
-         * class due to a low watermark being hit */
-        if (lru_maintainer_check_clsid != 0) {
-            did_moves = lru_maintainer_juggle(lru_maintainer_check_clsid);
-            lru_maintainer_check_clsid = 0;
-        } else {
-            for (i = POWER_SMALLEST; i < MAX_NUMBER_OF_SLAB_CLASSES; i++) {
-                did_moves += lru_maintainer_juggle(i);
-            }
+        /* Once per second at most */
+        if (last_crawler_check != current_time) {
+        	did_moves = lru_maintainer_free();
+
+            last_crawler_check = current_time;
         }
+
         if (did_moves == 0) {
             if (to_sleep < MAX_LRU_MAINTAINER_SLEEP)
                 to_sleep += 1000;
@@ -1117,11 +944,7 @@ static void *lru_maintainer_thread(void *arg) {
             if (to_sleep < MIN_LRU_MAINTAINER_SLEEP)
                 to_sleep = MIN_LRU_MAINTAINER_SLEEP;
         }
-        /* Once per second at most */
-        if (settings.lru_crawler && last_crawler_check != current_time) {
-            lru_maintainer_crawler_check(&cdata);
-            last_crawler_check = current_time;
-        }
+
     }
     pthread_mutex_unlock(&lru_maintainer_lock);
     if (settings.verbose > 2)

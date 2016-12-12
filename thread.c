@@ -535,7 +535,7 @@ void sidethread_conn_close(conn *c) {
 item_metadata *item_alloc(char *key, size_t nkey, int flags, rel_time_t exptime, int nbytes) {
     item_metadata *it;
     /* do_item_alloc handles its own locks */
-    it = do_item_alloc(key, nkey, flags, exptime, nbytes);
+    it = do_item_alloc(key, nkey, flags, exptime, nbytes, NULL);
     return it;
 }
 
@@ -626,7 +626,6 @@ item_metadata *item_get_update(item_metadata *item) {
 	item_metadata *it;
 	uint32_t hv;
 	hv = hash(ITEM_key(item->item), item->item->nkey);
-	// do_item_get_update handles its own locks
     it = do_item_get_update(item, hv);
     return it;
 }

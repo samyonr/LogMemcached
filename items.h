@@ -16,10 +16,10 @@ void *freelist_alloc(void);
 void freelist_free(void *ptr, size_t size, unsigned int id);
 
 /*@null@*/
-item_metadata *do_item_alloc(char *key, const size_t nkey, const unsigned int flags, const rel_time_t exptime, const int nbytes);
+item_metadata *do_item_alloc(char *key, const size_t nkey, const unsigned int flags, const rel_time_t exptime, const int nbytes, bool *succeed);
 void item_free(item_metadata *it);
 bool item_size_ok(const size_t nkey, const int flags, const int nbytes);
-
+size_t item_make_header(const uint8_t nkey, const unsigned int flags, const int nbytes, char *suffix, uint8_t *nsuffix);
 int  do_item_link(item_metadata *it, const uint32_t hv);     /** may fail if transgresses limits */
 void do_item_unlink(item_metadata *it, const uint32_t hv);
 void do_item_unlink_nolock(item_metadata *it, const uint32_t hv);

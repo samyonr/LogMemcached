@@ -85,6 +85,8 @@
 /* slab class max is a 6-bit number, -1. */
 #define MAX_NUMBER_OF_SLAB_CLASSES (63 + 1)
 #define MEMLOG_DEFAULT_SIZE (1 * 1024 * 1024 * 1024) // 1GB
+//#define MEMLOG_DEFAULT_SIZE (1 * 256) // 256 Bytes
+
 
 /** How long an object can reasonably be assumed to be locked before
     harvesting it on a low memory condition. Default: disabled. */
@@ -112,7 +114,10 @@
 
 #define ITEM_ntotal(item) (sizeof(struct _stritem_data) + (item)->nkey + 1 \
          + (item)->nsuffix + (item)->nbytes \
-         + (((item)->it_data_flags & ITEM_CAS) ? sizeof(uint64_t) : 0))
+         + ((((item)->it_data_flags & ITEM_CAS) || \
+        		 ((item)->it_data_flags & ITEM_DELETED) || \
+				 ((item)->it_data_flags & ITEM_CORRUPTED) || \
+				 ((item)->it_data_flags & ITEM_CYCLE)) ? sizeof(uint64_t) : 0))
 
 #define ITEM_clsid(item) ((item)->slabs_clsid & ~(3<<6))
 
@@ -297,6 +302,7 @@ struct stats {
     uint64_t      log_worker_written; /* logs written by worker threads */
     uint64_t      log_watcher_skipped; /* logs watchers missed */
     uint64_t      log_watcher_sent; /* logs sent to watcher buffers */
+    uint64_t	  mem_current; /* current position in the memory */
     struct timeval maxconns_entered;  /* last time maxconns entered */
 };
 
@@ -387,11 +393,13 @@ extern struct settings settings;
 
 /* Item was fetched at least once in its lifetime */
 #define ITEM_FETCHED 8
-/* Appended on fetch, removed on LRU shuffling */
-#define ITEM_ACTIVE 16
-
+/* Item that pads the end of the buffer  */
+#define ITEM_CYCLE 16
+/* Item is during writing process */
 #define ITEM_DIRTY		32
+/* Item was corrupted. The key was written without the value */
 #define ITEM_CORRUPTED	64
+/* Item was deleted. The key specifies the deleted item */
 #define ITEM_DELETED	128
 
 /**

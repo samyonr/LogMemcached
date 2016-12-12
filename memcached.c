@@ -1018,7 +1018,9 @@ static void complete_nread_ascii(conn *c) {
 	}
 
     if (!is_valid) {
+		it->item->it_data_flags |= ITEM_CORRUPTED;
         out_string(c, "CLIENT_ERROR bad data chunk");
+
     } else {
       ret = store_item(it, comm, c);
 
@@ -2512,7 +2514,7 @@ enum store_item_type do_store_item(item_metadata *it, int comm, conn *c, const u
 
                 flags = (uint32_t) strtoul(ITEM_suffix(old_it->item), (char **) NULL, 10);
 
-                new_it = do_item_alloc(key, it->item->nkey, flags, old_it->item->exptime, it->item->nbytes + old_it->item->nbytes - 2 /* CRLF */);
+                new_it = do_item_alloc(key, it->item->nkey, flags, old_it->item->exptime, it->item->nbytes + old_it->item->nbytes - 2 /* CRLF */, NULL);
 
                 if (new_it == NULL) {
                     failed_alloc = 1;
@@ -2792,6 +2794,8 @@ static void server_stats(ADD_STAT add_stats, conn *c) {
     APPEND_STAT("log_worker_written", "%llu", (unsigned long long)stats.log_worker_written);
     APPEND_STAT("log_watcher_skipped", "%llu", (unsigned long long)stats.log_watcher_skipped);
     APPEND_STAT("log_watcher_sent", "%llu", (unsigned long long)stats.log_watcher_sent);
+    APPEND_STAT("mem_current", "%llu", (unsigned long long)stats.mem_current);
+
     STATS_UNLOCK();
 }
 
@@ -3463,7 +3467,7 @@ enum delta_result_type do_add_delta(conn *c, const char *key, const size_t nkey,
     if (it->refcount > 1) {
     	item_metadata *new_it;
         uint32_t flags = (uint32_t) strtoul(ITEM_suffix(it->item)+1, (char **) NULL, 10);
-        new_it = do_item_alloc(ITEM_key(it->item), it->item->nkey, flags, it->item->exptime, res + 2);
+        new_it = do_item_alloc(ITEM_key(it->item), it->item->nkey, flags, it->item->exptime, res + 2, NULL);
         if (new_it == 0) {
             do_item_remove(it);
             return EOM;
@@ -3533,10 +3537,15 @@ static void process_delete_command(conn *c, token_t *tokens, const size_t ntoken
         c->thread->stats.slab_stats[ITEM_clsid(it)].delete_hits++;
         pthread_mutex_unlock(&c->thread->stats.mutex);
 
-        do_item_alloc(key, nkey, ITEM_DELETED, 0, 2);
-        item_unlink(it);
-        item_remove(it);      /* release our reference */
-        out_string(c, "DELETED");
+        bool succeed = false;
+        do_item_alloc(key, nkey, ITEM_DELETED, 0, 0, &succeed);
+        if (!succeed) {
+            out_of_memory(c, "SERVER_ERROR Out of memory allocating new item");
+        } else {
+			item_unlink(it);
+			item_remove(it);      /* release our reference */
+			out_string(c, "DELETED");
+        }
     } else {
         pthread_mutex_lock(&c->thread->stats.mutex);
         c->thread->stats.delete_misses++;

@@ -84,8 +84,8 @@
 #define CHUNK_ALIGN_BYTES 8
 /* slab class max is a 6-bit number, -1. */
 #define MAX_NUMBER_OF_SLAB_CLASSES (63 + 1)
-#define MEMLOG_DEFAULT_SIZE (1 * 1024 * 1024 * 1024) // 1GB
-//#define MEMLOG_DEFAULT_SIZE (1 * 256) // 256 Bytes
+//#define MEMLOG_DEFAULT_SIZE (1 * 1024 * 1024 * 1024) // 1GB
+#define MEMLOG_DEFAULT_SIZE (1 * 256) // 256 Bytes
 
 
 /** How long an object can reasonably be assumed to be locked before
@@ -378,6 +378,9 @@ struct settings {
     unsigned int logger_buf_size; /* size of per-thread logger buffer */
     bool lru_log_enabled; /* enabling replicating item to the end of the log on GET requests */
     unsigned int lru_log_get_count; /* after how many get requests to replicates */
+    bool backup_server; /* settings LogMemcached to act as backup server */
+    bool backup_client; /* settings LogMemcached to act as backup client */
+    char *backup_client_servername; /* settings LogMemcached's backup server address */
 };
 
 extern struct stats stats;
@@ -632,6 +635,7 @@ extern int daemonize(int nochdir, int noclose);
 #include "trace.h"
 #include "hash.h"
 #include "util.h"
+#include "backup_rdma.h"
 
 /*
  * Functions such as the libevent-related calls that need to do cross-thread

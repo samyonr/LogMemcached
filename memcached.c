@@ -247,6 +247,9 @@ static void settings_init(void) {
     settings.logger_buf_size = LOGGER_BUF_SIZE;
     settings.lru_log_enabled = false;
     settings.lru_log_get_count = 0;
+    settings.backup_server = false;
+    settings.backup_client = false;
+    settings.backup_client_servername = NULL;
 }
 
 /*
@@ -2847,6 +2850,9 @@ static void process_stat_settings(ADD_STAT add_stats, void *c) {
     APPEND_STAT("track_sizes", "%s", item_stats_sizes_status() ? "yes" : "no");
     APPEND_STAT("lru_log_enabled", "%s", settings.lru_log_enabled ? "yes" : "no");
     APPEND_STAT("lru_log_get_count", "%lu", (unsigned long)settings.lru_log_get_count);
+    APPEND_STAT("backup_server", "%s", settings.backup_server ? "yes" : "no");
+    APPEND_STAT("backup_client", "%s", settings.backup_client ? "yes" : "no");
+    APPEND_STAT("backup_client_servername", "%s", settings.backup_client_servername ? settings.backup_client_servername : "NULL");
 }
 
 static void conn_to_str(const conn *c, char *buf) {
@@ -5097,6 +5103,10 @@ static void usage(void) {
            "              - modern: Enables 'modern' defaults. See release notes (higly recommended!).\n"
            "              - track_sizes: Enable dynamic reports for 'stats sizes' command.\n"
     	   "			  - lru_log_get_count: Set after how many GET requests to replicate the item.\n"
+    	   "			  - backup_server: Set the LogMemcached to act as a backup server, replicating\n"
+    	   "			  - the data to backup clients."
+     	   "			  - backup_client: Set the LogMemcached to act as a backup client, replicating\n"
+     	   "			  - the data from backup server."
            );
     return;
 }
@@ -5395,7 +5405,9 @@ int main (int argc, char **argv) {
         SLAB_CHUNK_MAX,
         TRACK_SIZES,
         MODERN,
-		LRU_LOG_GET_COUNT
+		LRU_LOG_GET_COUNT,
+		BACKUP_SERVER,
+		BACKUP_CLIENT
     };
     char *const subopts_tokens[] = {
         [MAXCONNS_FAST] = "maxconns_fast",
@@ -5419,6 +5431,8 @@ int main (int argc, char **argv) {
         [TRACK_SIZES] = "track_sizes",
         [MODERN] = "modern",
 		[LRU_LOG_GET_COUNT] = "lru_log_get_count",
+		[BACKUP_SERVER] = "backup_server",
+		[BACKUP_CLIENT] = "backup_client",
         NULL
     };
 
@@ -5851,11 +5865,24 @@ int main (int argc, char **argv) {
             case LRU_LOG_GET_COUNT:
                 if (subopts_value == NULL) {
                     fprintf(stderr, "Missing lru_log_get_count argument\n");
+                    return 1;
                 }
                 if (!safe_strtoul(subopts_value, &settings.lru_log_get_count)) {
                     fprintf(stderr, "could not parse argument to lru_log_get_count\n");
+                    return 1;
                 }
             	settings.lru_log_enabled = true;
+            	break;
+            case BACKUP_SERVER:
+            	settings.backup_server = true;
+            	break;
+            case BACKUP_CLIENT:
+                if (subopts_value == NULL) {
+                    fprintf(stderr, "Missing backup_client argument\n");
+                    return 1;
+                }
+            	settings.backup_client = true;
+            	settings.backup_client_servername = strdup(subopts_value);
             	break;
             default:
                 printf("Illegal suboption \"%s\"\n", subopts_value);
@@ -6141,6 +6168,13 @@ int main (int argc, char **argv) {
     if (stats_state.curr_conns + stats_state.reserved_fds >= settings.maxconns - 1) {
         fprintf(stderr, "Maxconns setting is too low, use -c to increase.\n");
         exit(EXIT_FAILURE);
+    }
+
+    if (settings.backup_server) {
+    	rdma_init(false, NULL);
+    } else if (settings.backup_client) {
+    	 // current state of the implementation does not support being a server and a client
+    	rdma_init(true, settings.backup_client_servername);
     }
 
     if (pid_file != NULL) {

@@ -8,6 +8,8 @@ testapp_SOURCES = testapp.c util.c util.h
 
 timedrun_SOURCES = timedrun.c
 
+AM_LDFLAGS = -libverbs
+
 memcached_SOURCES = memcached.c memcached.h \
                     hash.c hash.h \
                     jenkins_hash.c jenkins_hash.h \
@@ -21,7 +23,8 @@ memcached_SOURCES = memcached.c memcached.h \
                     trace.h cache.h sasl_defs.h \
                     bipbuffer.c bipbuffer.h \
                     logger.c logger.h \
-                    crawler.c crawler.h
+                    crawler.c crawler.h \
+                    backup_rdma.c backup_rdma.h
 
 if BUILD_CACHE
 memcached_SOURCES += cache.c

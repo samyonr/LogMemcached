@@ -59,14 +59,16 @@
 #include "memcached.h"
 
 #define BACKLOG 10 // how many pending connections queue will hold
+#define IBV_PORT 1 // hard coded for now
+#define BACKUP_IP_PORT "18515" // hard coded for now
 
 enum {
 	PINGPONG_RECV_WRID = 1, PINGPONG_SEND_WRID = 2,
 };
 
-static int page_size;
+static int g_page_size;
 
-struct pingpong_context {
+struct backup_ibv_context {
 	struct ibv_context *context;
 	struct ibv_comp_channel *channel;
 	struct ibv_pd *pd;
@@ -80,7 +82,7 @@ struct pingpong_context {
 	struct ibv_port_attr portinfo;
 };
 
-struct pingpong_dest {
+struct backup_ibv_dest {
 	unsigned int lid;
 	unsigned int qpn;
 	unsigned int psn;
@@ -89,38 +91,32 @@ struct pingpong_dest {
 	union ibv_gid gid;
 };
 
-struct ibv_meta {
-	struct ibv_device **dev_list;
-	struct ibv_device *ib_dev;
-	struct pingpong_context *ctx;
-	struct pingpong_dest my_dest;
-	struct timeval start;
-	struct timeval end;
-	char *ib_devname;
-	char *servername;
-	char *port;
-	int ib_port;
-	int size;
+struct backup_meta {
+	struct ibv_device **ibv_device_list;
+	struct ibv_device *ibv_device;
+	struct backup_ibv_context *ctx;
+	struct backup_ibv_dest ibv_dest;
+	struct ip_addr ip_dest;
 	enum ibv_mtu mtu;
 	int rx_depth;
-	int iters;
-	int routs;
-	int rcnt;
-	int scnt;
 	int num_cq_events;
 	int sl;
-	int gidx;
+	int sgid_index;
 	char gid[33];
 };
 
-struct ibv_meta g_ibv_meta = { .port = "18515", .ib_port = 1, .size = 4096,
-		.mtu = IBV_MTU_1024, .rx_depth = 500, .iters = 1000, .num_cq_events = 0,
-		.sl = 0, .gidx = -1 };
+struct backup_meta g_backup_meta = {
+		.mtu = IBV_MTU_1024,
+		.rx_depth = 500,
+		.num_cq_events = 0,
+		.sl = 0,
+		.sgid_index = -1
+};
 
 static pthread_t g_server_thread;
 static pthread_t g_client_thread;
-int backup_client(struct addr addr_data);
-int backup_server(struct addr addr_data);
+int backup_client(struct ip_addr addr_data);
+int backup_server(struct ip_addr addr_data);
 void *backup_server_thread(void *arg);
 void *backup_client_thread(void *arg);
 void *backup_server_connection_handler(void *socket_desc);
@@ -130,101 +126,92 @@ void sigchld_handler(int s);
 /* get sockaddr, IPv4 or IPv6 */
 void *get_in_addr(struct sockaddr *sa);
 
-int pp_connect_ctx(struct pingpong_context *ctx, int port, int my_psn,
-		enum ibv_mtu mtu, int sl, struct pingpong_dest *dest, int sgid_idx);
-struct pingpong_context *pp_init_ctx(struct ibv_device *ib_dev, int size,
-		int rx_depth, int port, int is_server);
-int pp_post_recv(struct pingpong_context *ctx, int n);
-int pp_post_send(struct pingpong_context *ctx);
-int pp_get_port_info(struct ibv_context *context, int port,
-		struct ibv_port_attr *attr);
-int pp_close_ctx(struct pingpong_context *ctx);
+int connect_ctx(struct backup_ibv_context *ctx, int port, int my_psn, enum ibv_mtu mtu, int sl, struct backup_ibv_dest *dest, int sgid_index);
+struct backup_ibv_context *init_ctx(struct ibv_device *ibv_device, int size, int rx_depth, int port, int is_server);
+int close_ctx(struct backup_ibv_context *ctx);
 void wire_gid_to_gid(const char *wgid, union ibv_gid *gid);
 void gid_to_wire_gid(const union ibv_gid *gid, char wgid[]);
 
-int rdma_init(int is_client, char *servername) {
+int rdma_init(int is_client, char *server_name, char *ibv_device_name) {
 	srand48(getpid() * time(NULL));
 
-	g_ibv_meta.servername = servername;
+	g_backup_meta.ip_dest.ip = server_name;
+	g_backup_meta.ip_dest.port = BACKUP_IP_PORT; // default, not configurable yet
 
-	page_size = sysconf(_SC_PAGESIZE);
+	g_page_size = sysconf(_SC_PAGESIZE);
 
-	g_ibv_meta.dev_list = ibv_get_device_list(NULL);
-	if (!g_ibv_meta.dev_list) {
+	g_backup_meta.ibv_device_list = ibv_get_device_list(NULL);
+	if (!g_backup_meta.ibv_device_list) {
 		perror("Failed to get IB devices list");
 		return false;
 	}
 
-	if (!g_ibv_meta.ib_devname) {
-		g_ibv_meta.ib_dev = *g_ibv_meta.dev_list;
-		if (!g_ibv_meta.ib_dev) {
+	if (!ibv_device_name) { // preferable ibv device
+		g_backup_meta.ibv_device = *g_backup_meta.ibv_device_list;
+		if (!g_backup_meta.ibv_device) {
 			fprintf(stderr, "No IB devices found\n");
 			return false;
 		}
 	} else {
 		int i;
-		for (i = 0; g_ibv_meta.dev_list[i]; ++i)
-			if (!strcmp(ibv_get_device_name(g_ibv_meta.dev_list[i]),
-					g_ibv_meta.ib_devname))
+		for (i = 0; g_backup_meta.ibv_device_list[i]; ++i) {
+			if (!strcmp(ibv_get_device_name(g_backup_meta.ibv_device_list[i]), ibv_device_name))
 				break;
-		g_ibv_meta.ib_dev = g_ibv_meta.dev_list[i];
-		if (!g_ibv_meta.ib_dev) {
-			fprintf(stderr, "IB device %s not found\n", g_ibv_meta.ib_devname);
+		}
+		g_backup_meta.ibv_device = g_backup_meta.ibv_device_list[i];
+		if (!g_backup_meta.ibv_device) {
+			fprintf(stderr, "IB device %s not found\n", ibv_device_name);
 			return false;
 		}
 	}
 
-	g_ibv_meta.ctx = pp_init_ctx(g_ibv_meta.ib_dev, g_ibv_meta.size,
-			g_ibv_meta.rx_depth, g_ibv_meta.ib_port, !g_ibv_meta.servername);
-	if (!g_ibv_meta.ctx)
+	g_backup_meta.ctx = init_ctx(g_backup_meta.ibv_device, 2*4096, //TODO: fix size
+			g_backup_meta.rx_depth, IBV_PORT, !g_backup_meta.ip_dest.ip);
+	if (!g_backup_meta.ctx)
 		return false;
 
-	if (pp_get_port_info(g_ibv_meta.ctx->context, g_ibv_meta.ib_port,
-			&g_ibv_meta.ctx->portinfo)) {
+	if (ibv_query_port(g_backup_meta.ctx->context, IBV_PORT, &g_backup_meta.ctx->portinfo)) {
 		fprintf(stderr, "Couldn't get port info\n");
 		return false;
 	}
 
-	g_ibv_meta.my_dest.lid = g_ibv_meta.ctx->portinfo.lid;
-	if (g_ibv_meta.ctx->portinfo.link_layer == IBV_LINK_LAYER_INFINIBAND
-			&& !g_ibv_meta.my_dest.lid) {
+	g_backup_meta.ibv_dest.lid = g_backup_meta.ctx->portinfo.lid;
+	if (g_backup_meta.ctx->portinfo.link_layer == IBV_LINK_LAYER_INFINIBAND
+			&& !g_backup_meta.ibv_dest.lid) {
 		fprintf(stderr, "Couldn't get local LID or LID is zero\n");
 		return false;
 	}
 
-	if (g_ibv_meta.gidx >= 0) {
-		if (ibv_query_gid(g_ibv_meta.ctx->context, g_ibv_meta.ib_port,
-				g_ibv_meta.gidx, &g_ibv_meta.my_dest.gid)) {
+	if (g_backup_meta.sgid_index >= 0) {
+		if (ibv_query_gid(g_backup_meta.ctx->context, IBV_PORT,
+				g_backup_meta.sgid_index, &g_backup_meta.ibv_dest.gid)) {
 			fprintf(stderr, "Could not get local gid for gid index %d\n",
-					g_ibv_meta.gidx);
+					g_backup_meta.sgid_index);
 			return false;
 		}
 	} else
-		memset(&g_ibv_meta.my_dest.gid, 0, sizeof g_ibv_meta.my_dest.gid);
+		memset(&g_backup_meta.ibv_dest.gid, 0, sizeof g_backup_meta.ibv_dest.gid);
 
-	g_ibv_meta.my_dest.qpn = g_ibv_meta.ctx->qp->qp_num;
-	g_ibv_meta.my_dest.psn = lrand48() & 0xffffff;
-	inet_ntop(AF_INET6, &g_ibv_meta.my_dest.gid, g_ibv_meta.gid,
-			sizeof g_ibv_meta.gid);
+	g_backup_meta.ibv_dest.qpn = g_backup_meta.ctx->qp->qp_num;
+	g_backup_meta.ibv_dest.psn = lrand48() & 0xffffff;
+	inet_ntop(AF_INET6, &g_backup_meta.ibv_dest.gid, g_backup_meta.gid, sizeof g_backup_meta.gid);
 	printf("  local address:  LID 0x%04x, QPN 0x%06x, PSN 0x%06x, GID %s\n",
-			g_ibv_meta.my_dest.lid, g_ibv_meta.my_dest.qpn,
-			g_ibv_meta.my_dest.psn, g_ibv_meta.gid);
+			g_backup_meta.ibv_dest.lid, g_backup_meta.ibv_dest.qpn,
+			g_backup_meta.ibv_dest.psn, g_backup_meta.gid);
 
-	struct addr addr_data;
-	addr_data.ip = g_ibv_meta.servername;
-	addr_data.port = g_ibv_meta.port;
+
 	if (is_client) {
-		backup_client(addr_data);
+		backup_client(g_backup_meta.ip_dest);
 	} else {
-		backup_server(addr_data);
+		backup_server(g_backup_meta.ip_dest);
 	}
 
 	return true;
 }
 
-int backup_client(struct addr addr_data) {
+int backup_client(struct ip_addr addr_data) {
 	int rv;
-	struct addr *addr = (struct addr*) malloc(sizeof(struct addr));
+	struct ip_addr *addr = (struct ip_addr*) malloc(sizeof(struct ip_addr));
 	addr->ip = addr_data.ip;
 	addr->port = addr_data.port;
 
@@ -240,7 +227,7 @@ int backup_client(struct addr addr_data) {
 }
 
 void *backup_client_thread(void *arg) {
-	struct addr *addr = (struct addr *) arg;
+	struct ip_addr *addr = (struct ip_addr *) arg;
 	struct addrinfo hints, *servinfo, *p;
 	int rv;
 	char s[INET6_ADDRSTRLEN];
@@ -248,9 +235,12 @@ void *backup_client_thread(void *arg) {
 
 	char msg[sizeof "0000:000000:000000:00000000000000000000000000000000"];
 	char msg2[128];
-	struct pingpong_dest *rem_dest = NULL;
+	struct backup_ibv_dest *rem_dest = NULL;
 	char gid[33];
+	int run = false;;
 
+
+	// create TCP connection
 	memset(&hints, 0, sizeof hints);
 	hints.ai_family = AF_UNSPEC;
 	hints.ai_socktype = SOCK_STREAM;
@@ -289,9 +279,10 @@ void *backup_client_thread(void *arg) {
 
 	freeaddrinfo(servinfo); // all done with this structure
 
-	gid_to_wire_gid(&g_ibv_meta.my_dest.gid, gid);
-	sprintf(msg, "%04x:%06x:%06x:%s", g_ibv_meta.my_dest.lid,
-			g_ibv_meta.my_dest.qpn, g_ibv_meta.my_dest.psn, gid);
+	// exchange ibv information
+	gid_to_wire_gid(&g_backup_meta.ibv_dest.gid, gid);
+	sprintf(msg, "%04x:%06x:%06x:%s", g_backup_meta.ibv_dest.lid,
+			g_backup_meta.ibv_dest.qpn, g_backup_meta.ibv_dest.psn, gid);
 
 	if (write(sockfd, msg, sizeof msg) != sizeof msg) {
 		fprintf(stderr, "Couldn't send local address\n");
@@ -314,8 +305,7 @@ void *backup_client_thread(void *arg) {
 		return NULL;
 	}
 
-	sscanf(msg, "%x:%x:%x:%s", &rem_dest->lid, &rem_dest->qpn, &rem_dest->psn,
-			gid);
+	sscanf(msg, "%x:%x:%x:%s", &rem_dest->lid, &rem_dest->qpn, &rem_dest->psn, gid);
 	wire_gid_to_gid(gid, &rem_dest->gid);
 
 	if (read(sockfd, msg2, sizeof msg2) != sizeof msg2) {
@@ -325,117 +315,105 @@ void *backup_client_thread(void *arg) {
 		return NULL;
 	}
 
-	if (msg2[0] != 'j')
-	{
-		sscanf(msg2, "RDMA addr %lx rkey %x", &rem_dest->remote_address, &rem_dest->remote_key);
-		//printf("RDMA addr %lx rkey %x\n",rem_dest->remote_address,rem_dest->remote_key);
-		rem_dest->remote_key = ntohl(rem_dest->remote_key);
-		rem_dest->remote_address = ntohll(rem_dest->remote_address);
-		printf("RDMA addr %lx rkey %x\n",rem_dest->remote_address,rem_dest->remote_key);
-	}
+	sscanf(msg2, "RDMA addr %lx rkey %x", &rem_dest->remote_address, &rem_dest->remote_key);
+	rem_dest->remote_key = ntohl(rem_dest->remote_key);
+	rem_dest->remote_address = ntohll(rem_dest->remote_address);
+	printf("RDMA addr %lx rkey %x\n",rem_dest->remote_address,rem_dest->remote_key);
+
 	write(sockfd, "done", sizeof "done");
 
+	// ibv information exchanged, close socket
 	close(sockfd);
 
 	inet_ntop(AF_INET6, &rem_dest->gid, gid, sizeof gid);
 	printf("  remote address: LID 0x%04x, QPN 0x%06x, PSN 0x%06x, GID %s\n",
 			rem_dest->lid, rem_dest->qpn, rem_dest->psn, gid);
 
-	if (pp_connect_ctx(g_ibv_meta.ctx, g_ibv_meta.ib_port,
-			g_ibv_meta.my_dest.psn, g_ibv_meta.mtu, g_ibv_meta.sl, rem_dest,
-			g_ibv_meta.gidx)) {
+	// connect ibv qp
+	if (connect_ctx(g_backup_meta.ctx, IBV_PORT,
+			g_backup_meta.ibv_dest.psn, g_backup_meta.mtu, g_backup_meta.sl, rem_dest,
+			g_backup_meta.sgid_index)) {
 		return NULL;
 	}
 
-	if (gettimeofday(&g_ibv_meta.start, NULL)) {
-		perror("gettimeofday");
-		return NULL;
-	}
-
-	g_ibv_meta.rcnt = g_ibv_meta.scnt = 0;
 	//int ne,i;
 
-
-	struct ibv_sge list = {
-			.addr = (uintptr_t) g_ibv_meta.ctx->buf,
-			.length = g_ibv_meta.ctx->size,
-			.lkey = g_ibv_meta.ctx->mr->lkey
-	};
-	struct ibv_send_wr wr = {
-			.wr_id = 0,
-			.sg_list = &list,
-			.num_sge = 1,
-			.opcode = IBV_WR_RDMA_READ,
-			.send_flags = 0,
-			.wr.rdma.remote_addr = rem_dest->remote_address,
-			.wr.rdma.rkey        = rem_dest->remote_key
-	};
-	struct ibv_send_wr *bad_wr;
-	//struct ibv_wc wc[1];
-
-	int res = ibv_post_send(g_ibv_meta.ctx->qp, &wr, &bad_wr);
-	printf("res is %d\n", res);
-	/*
-	do {
-
-		ne = ibv_poll_cq(g_ibv_meta.ctx->cq, 1, wc);
-		if (ne < 0) {
-			fprintf(stderr, "poll CQ failed %d\n", ne);
-			return NULL;
-		}
-
-	}  while (ne < 1);
-	for (i = 0; i < ne; ++i) {
-		if (wc[i].status != IBV_WC_SUCCESS) {
-			fprintf(stderr, "Failed status %s (%d) for wr_id %d\n",
-				ibv_wc_status_str(wc[i].status),
-				wc[i].status, (int) wc[i].wr_id);
-			return NULL;
-		} else {
-			char *tbuf = (char *) g_ibv_meta.ctx->buf;
-			printf("b[0] %c", ((char *) g_ibv_meta.ctx->buf)[0]);
-			printf("b[1] %c", ((char *) g_ibv_meta.ctx->buf)[1]);
-			printf("b[2] %c", ((char *) g_ibv_meta.ctx->buf)[2]);
-			printf("b[3] %c\n", tbuf[3]);
-		}
-	}
-	*/
-	usleep(20000);
-	char *tbuf = (char *) g_ibv_meta.ctx->buf;
-	printf("%c", ((char *) g_ibv_meta.ctx->buf)[0]);
-	printf("%c", ((char *) g_ibv_meta.ctx->buf)[1]);
-	printf("%c", ((char *) g_ibv_meta.ctx->buf)[2]);
-	printf("%c\n", tbuf[3]);
-	if (gettimeofday(&g_ibv_meta.end, NULL)) {
-		perror("gettimeofday");
-		return NULL;
-	}
-
+	int i = 0;
+	run = true;;
+	while (run)
 	{
-		float usec = (g_ibv_meta.end.tv_sec - g_ibv_meta.start.tv_sec) * 1000000
-				+ (g_ibv_meta.end.tv_usec - g_ibv_meta.start.tv_usec);
-		long long bytes = (long long) g_ibv_meta.size * g_ibv_meta.iters * 2;
+		run = false;
+		struct ibv_sge list = {
+				.addr = (uintptr_t) g_backup_meta.ctx->buf,
+				.length = g_backup_meta.ctx->size/2,
+				.lkey = g_backup_meta.ctx->mr->lkey
+		};
+		struct ibv_send_wr wr = {
+				.wr_id = 0,
+				.sg_list = &list,
+				.num_sge = 1,
+				.opcode = IBV_WR_RDMA_READ,
+				.send_flags = 0,
+				.wr.rdma.remote_addr = rem_dest->remote_address + 4096,
+				.wr.rdma.rkey        = rem_dest->remote_key
+		};
+		struct ibv_send_wr *bad_wr;
+		//struct ibv_wc wc[1];
+		i++;
+		int res = ibv_post_send(g_backup_meta.ctx->qp, &wr, &bad_wr);
+		printf("res is %d\n", res);
+		/*
+		do {
 
-		printf("%lld bytes in %.2f seconds = %.2f Mbit/sec\n", bytes,
-				usec / 1000000., bytes * 8. / usec);
-		printf("%d iters in %.2f seconds = %.2f usec/iter\n", g_ibv_meta.iters,
-				usec / 1000000., usec / g_ibv_meta.iters);
+			ne = ibv_poll_cq(g_backup_meta.ctx->cq, 1, wc);
+			if (ne < 0) {
+				fprintf(stderr, "poll CQ failed %d\n", ne);
+				return NULL;
+			}
+
+		}  while (ne < 1);
+		for (i = 0; i < ne; ++i) {
+			if (wc[i].status != IBV_WC_SUCCESS) {
+				fprintf(stderr, "Failed status %s (%d) for wr_id %d\n",
+					ibv_wc_status_str(wc[i].status),
+					wc[i].status, (int) wc[i].wr_id);
+				return NULL;
+			} else {
+				char *tbuf = (char *) g_backup_meta.ctx->buf;
+				printf("b[0] %c", ((char *) g_backup_meta.ctx->buf)[0]);
+				printf("b[1] %c", ((char *) g_backup_meta.ctx->buf)[1]);
+				printf("b[2] %c", ((char *) g_backup_meta.ctx->buf)[2]);
+				printf("b[3] %c\n", tbuf[3]);
+			}
+		}
+		*/
+		usleep(20000);
+		for (int k = 0; k < g_backup_meta.ctx->size / 2; k++) {
+			if(k % 20 == 0) {
+				printf("\n%d ",k);
+			}
+			printf("%c", ((char *) g_backup_meta.ctx->buf)[k]);
+		}
+		printf("\n");
+
+		if (i == 9000) {
+			run = false;
+		}
 	}
+	ibv_ack_cq_events(g_backup_meta.ctx->cq, g_backup_meta.num_cq_events); // TODO: check if needed and when
 
-	ibv_ack_cq_events(g_ibv_meta.ctx->cq, g_ibv_meta.num_cq_events);
-
-	if (pp_close_ctx(g_ibv_meta.ctx))
+	if (close_ctx(g_backup_meta.ctx))
 		return NULL;
 
-	ibv_free_device_list(g_ibv_meta.dev_list);
+	ibv_free_device_list(g_backup_meta.ibv_device_list);
 	free(rem_dest);
 
 	return NULL;
 }
 
-int backup_server(struct addr addr_data) {
+int backup_server(struct ip_addr addr_data) {
 	int rv;
-	struct addr *addr = (struct addr*) malloc(sizeof(struct addr));
+	struct ip_addr *addr = (struct ip_addr*) malloc(sizeof(struct ip_addr));
 	addr->ip = addr_data.ip;
 	addr->port = addr_data.port;
 
@@ -459,7 +437,7 @@ void *backup_server_thread(void *arg) {
 	int yes = 1;
 	char s[INET6_ADDRSTRLEN];
 	int rv;
-	struct addr *addr = (struct addr *) arg;
+	struct ip_addr *addr = (struct ip_addr *) arg;
 
 	memset(&hints, 0, sizeof hints);
 	hints.ai_family = AF_UNSPEC;
@@ -554,7 +532,7 @@ void *backup_server_connection_handler(void *socket_desc) {
 	char msg2[128];
 	int read_cnt;
 	int conn_fd = (int) (*(char *) socket_desc);
-	struct pingpong_dest *rem_dest = NULL;
+	struct backup_ibv_dest *rem_dest = NULL;
 	char gid[33];
 
 	read_cnt = read(conn_fd, msg, sizeof msg);
@@ -576,9 +554,9 @@ void *backup_server_connection_handler(void *socket_desc) {
 			gid);
 	wire_gid_to_gid(gid, &rem_dest->gid);
 
-	if (pp_connect_ctx(g_ibv_meta.ctx, g_ibv_meta.ib_port,
-			g_ibv_meta.my_dest.psn, g_ibv_meta.mtu, g_ibv_meta.sl, rem_dest,
-			g_ibv_meta.gidx)) {
+	if (connect_ctx(g_backup_meta.ctx, IBV_PORT,
+			g_backup_meta.ibv_dest.psn, g_backup_meta.mtu, g_backup_meta.sl, rem_dest,
+			g_backup_meta.sgid_index)) {
 		fprintf(stderr, "Couldn't connect to remote QP\n");
 		free(rem_dest);
 		rem_dest = NULL;
@@ -586,9 +564,9 @@ void *backup_server_connection_handler(void *socket_desc) {
 		return NULL;
 	}
 
-	gid_to_wire_gid(&g_ibv_meta.my_dest.gid, gid);
-	sprintf(msg, "%04x:%06x:%06x:%s", g_ibv_meta.my_dest.lid,
-			g_ibv_meta.my_dest.qpn, g_ibv_meta.my_dest.psn, gid);
+	gid_to_wire_gid(&g_backup_meta.ibv_dest.gid, gid);
+	sprintf(msg, "%04x:%06x:%06x:%s", g_backup_meta.ibv_dest.lid,
+			g_backup_meta.ibv_dest.qpn, g_backup_meta.ibv_dest.psn, gid);
 	if (write(conn_fd, msg, sizeof msg) != sizeof msg) {
 		fprintf(stderr, "Couldn't send local address\n");
 		free(rem_dest);
@@ -599,10 +577,10 @@ void *backup_server_connection_handler(void *socket_desc) {
 
 	read(conn_fd, msg, sizeof msg); // read done
 
-	sprintf(msg2, "RDMA addr %lx rkey %x", htonll((uint64_t) (unsigned long) g_ibv_meta.ctx->buf),
-			htonl(g_ibv_meta.ctx->mr->rkey));
-	printf("RDMA addr %lx rkey %x\n", htonll((uint64_t) (unsigned long) g_ibv_meta.ctx->buf),
-				htonl(g_ibv_meta.ctx->mr->rkey));
+	sprintf(msg2, "RDMA addr %lx rkey %x", htonll((uint64_t) (unsigned long) g_backup_meta.ctx->buf),
+			htonl(g_backup_meta.ctx->mr->rkey));
+	printf("RDMA addr %lx rkey %x\n", htonll((uint64_t) (unsigned long) g_backup_meta.ctx->buf),
+				htonl(g_backup_meta.ctx->mr->rkey));
 	if (write(conn_fd, msg2, sizeof msg2) != sizeof msg2) {
 		fprintf(stderr, "Couldn't send local buffer address\n");
 		free(rem_dest);
@@ -622,52 +600,35 @@ void *backup_server_connection_handler(void *socket_desc) {
 	printf("  remote address: LID 0x%04x, QPN 0x%06x, PSN 0x%06x, GID %s\n",
 			rem_dest->lid, rem_dest->qpn, rem_dest->psn, gid);
 
-
-	if (gettimeofday(&g_ibv_meta.start, NULL)) {
-		perror("gettimeofday");
-		return NULL;
+	int let = 65;
+	for (int k = 0; k < g_backup_meta.ctx->size; k++)
+	{
+		((char *) g_backup_meta.ctx->buf)[k] = let;
+		let++;
+		if (let > 90)
+		{
+			let = 65;
+		}
 	}
 
-	g_ibv_meta.rcnt = g_ibv_meta.scnt = 0;
-
-	((char *) g_ibv_meta.ctx->buf)[0] = 'l';
-	((char *) g_ibv_meta.ctx->buf)[1] = 'e';
-	((char *) g_ibv_meta.ctx->buf)[2] = 'e';
-	((char *) g_ibv_meta.ctx->buf)[3] = 't';
 	for (int i = 0; i < 1000; i++) {
 		usleep(20000);
 	}
 
-	if (gettimeofday(&g_ibv_meta.end, NULL)) {
-		perror("gettimeofday");
-		return NULL;
-	}
+	ibv_ack_cq_events(g_backup_meta.ctx->cq, g_backup_meta.num_cq_events);
 
-	{
-		float usec = (g_ibv_meta.end.tv_sec - g_ibv_meta.start.tv_sec) * 1000000
-				+ (g_ibv_meta.end.tv_usec - g_ibv_meta.start.tv_usec);
-		long long bytes = (long long) g_ibv_meta.size * g_ibv_meta.iters * 2;
-
-		printf("%lld bytes in %.2f seconds = %.2f Mbit/sec\n", bytes,
-				usec / 1000000., bytes * 8. / usec);
-		printf("%d iters in %.2f seconds = %.2f usec/iter\n", g_ibv_meta.iters,
-				usec / 1000000., usec / g_ibv_meta.iters);
-	}
-
-	ibv_ack_cq_events(g_ibv_meta.ctx->cq, g_ibv_meta.num_cq_events);
-
-	if (pp_close_ctx(g_ibv_meta.ctx))
+	if (close_ctx(g_backup_meta.ctx))
 		return NULL;
 
-	ibv_free_device_list(g_ibv_meta.dev_list);
+	ibv_free_device_list(g_backup_meta.ibv_device_list);
 	free(rem_dest);
 
 	return NULL;
 }
 
-struct pingpong_context *pp_init_ctx(struct ibv_device *ib_dev, int size,
+struct backup_ibv_context *init_ctx(struct ibv_device *ibv_device, int size,
 		int rx_depth, int port, int is_server) {
-	struct pingpong_context *ctx;
+	struct backup_ibv_context *ctx;
 
 	ctx = calloc(1, sizeof *ctx);
 	if (!ctx)
@@ -676,7 +637,7 @@ struct pingpong_context *pp_init_ctx(struct ibv_device *ib_dev, int size,
 	ctx->size = size;
 	ctx->rx_depth = rx_depth;
 
-	ctx->buf = malloc(roundup(size, page_size));
+	ctx->buf = malloc(roundup(size, g_page_size));
 	if (!ctx->buf) {
 		fprintf(stderr, "Couldn't allocate work buf.\n");
 		return NULL;
@@ -684,10 +645,10 @@ struct pingpong_context *pp_init_ctx(struct ibv_device *ib_dev, int size,
 
 	memset(ctx->buf, 'm', size);
 
-	ctx->context = ibv_open_device(ib_dev);
+	ctx->context = ibv_open_device(ibv_device);
 	if (!ctx->context) {
 		fprintf(stderr, "Couldn't get context for %s\n",
-				ibv_get_device_name(ib_dev));
+				ibv_get_device_name(ibv_device));
 		return NULL;
 	}
 
@@ -699,7 +660,7 @@ struct pingpong_context *pp_init_ctx(struct ibv_device *ib_dev, int size,
 		return NULL;
 	}
 
-	ctx->mr = ibv_reg_mr(ctx->pd, ctx->buf, size, IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE| IBV_ACCESS_LOCAL_WRITE);
+	ctx->mr = ibv_reg_mr(ctx->pd, ctx->buf, size, IBV_ACCESS_REMOTE_READ | IBV_ACCESS_LOCAL_WRITE);
 	if (!ctx->mr) {
 		fprintf(stderr, "Couldn't register MR\n");
 		return NULL;
@@ -712,10 +673,17 @@ struct pingpong_context *pp_init_ctx(struct ibv_device *ib_dev, int size,
 	}
 
 	{
-		struct ibv_qp_init_attr attr = { .send_cq = ctx->cq, .recv_cq = ctx->cq,
-				.cap = { .max_send_wr = 1, .max_recv_wr = rx_depth,
-						.max_send_sge = 1, .max_recv_sge = 1 }, .qp_type =
-						IBV_QPT_RC };
+		struct ibv_qp_init_attr attr = {
+				.send_cq = ctx->cq,
+				.recv_cq = ctx->cq,
+				.cap = {
+						.max_send_wr = 1,
+						.max_recv_wr = rx_depth,
+						.max_send_sge = 1,
+						.max_recv_sge = 1
+				},
+				.qp_type = IBV_QPT_RC
+		};
 
 		ctx->qp = ibv_create_qp(ctx->pd, &attr);
 		if (!ctx->qp) {
@@ -725,12 +693,14 @@ struct pingpong_context *pp_init_ctx(struct ibv_device *ib_dev, int size,
 	}
 
 	{
-		struct ibv_qp_attr attr = { .qp_state = IBV_QPS_INIT, .pkey_index = 0,
-				.port_num = port, .qp_access_flags = IBV_ACCESS_REMOTE_READ };
+		struct ibv_qp_attr attr = {
+				.qp_state = IBV_QPS_INIT,
+				.pkey_index = 0,
+				.port_num = port,
+				.qp_access_flags = IBV_ACCESS_REMOTE_READ
+		};
 
-		if (ibv_modify_qp(ctx->qp, &attr,
-				IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT
-						| IBV_QP_ACCESS_FLAGS)) {
+		if (ibv_modify_qp(ctx->qp, &attr, IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT | IBV_QP_ACCESS_FLAGS)) {
 			fprintf(stderr, "Failed to modify QP to INIT\n");
 			return NULL;
 		}
@@ -739,20 +709,30 @@ struct pingpong_context *pp_init_ctx(struct ibv_device *ib_dev, int size,
 	return ctx;
 }
 
-int pp_connect_ctx(struct pingpong_context *ctx, int port, int my_psn,
-		enum ibv_mtu mtu, int sl, struct pingpong_dest *dest, int sgid_idx) {
+int connect_ctx(struct backup_ibv_context *ctx, int port, int my_psn,
+		enum ibv_mtu mtu, int sl, struct backup_ibv_dest *dest, int sgid_index) {
 	struct ibv_qp_attr attr =
-			{ .qp_state = IBV_QPS_RTR, .path_mtu = mtu,
-					.dest_qp_num = dest->qpn, .rq_psn = dest->psn,
-					.max_dest_rd_atomic = 1, .min_rnr_timer = 12, .ah_attr = {
-							.is_global = 0, .dlid = dest->lid, .sl = sl,
-							.src_path_bits = 0, .port_num = port } };
+			{
+					.qp_state = IBV_QPS_RTR,
+					.path_mtu = mtu,
+					.dest_qp_num = dest->qpn,
+					.rq_psn = dest->psn,
+					.max_dest_rd_atomic = 1,
+					.min_rnr_timer = 12,
+					.ah_attr = {
+							.is_global = 0,
+							.dlid = dest->lid,
+							.sl = sl,
+							.src_path_bits = 0,
+							.port_num = port
+					}
+			};
 
 	if (dest->gid.global.interface_id) {
 		attr.ah_attr.is_global = 1;
 		attr.ah_attr.grh.hop_limit = 1;
 		attr.ah_attr.grh.dgid = dest->gid;
-		attr.ah_attr.grh.sgid_index = sgid_idx;
+		attr.ah_attr.grh.sgid_index = sgid_index;
 	}
 	if (ibv_modify_qp(ctx->qp, &attr,
 			IBV_QP_STATE | IBV_QP_AV | IBV_QP_PATH_MTU | IBV_QP_DEST_QPN
@@ -778,7 +758,7 @@ int pp_connect_ctx(struct pingpong_context *ctx, int port, int my_psn,
 	return 0;
 }
 
-int pp_close_ctx(struct pingpong_context *ctx) {
+int close_ctx(struct backup_ibv_context *ctx) {
 	if (ibv_destroy_qp(ctx->qp)) {
 		fprintf(stderr, "Couldn't destroy QP\n");
 		return 1;
@@ -815,37 +795,6 @@ int pp_close_ctx(struct pingpong_context *ctx) {
 	free(ctx);
 
 	return 0;
-}
-
-int pp_post_recv(struct pingpong_context *ctx, int n) {
-	struct ibv_sge list = { .addr = (uintptr_t) ctx->buf, .length = ctx->size,
-			.lkey = ctx->mr->lkey };
-	struct ibv_recv_wr wr = { .wr_id = PINGPONG_RECV_WRID, .sg_list = &list,
-			.num_sge = 1, };
-	struct ibv_recv_wr *bad_wr;
-	int i;
-
-	for (i = 0; i < n; ++i)
-		if (ibv_post_recv(ctx->qp, &wr, &bad_wr))
-			break;
-
-	return i;
-}
-
-int pp_post_send(struct pingpong_context *ctx) {
-	struct ibv_sge list = { .addr = (uintptr_t) ctx->buf, .length = ctx->size,
-			.lkey = ctx->mr->lkey };
-	struct ibv_send_wr wr =
-			{ .wr_id = PINGPONG_SEND_WRID, .sg_list = &list, .num_sge = 1,
-					.opcode = IBV_WR_SEND, .send_flags = IBV_SEND_SIGNALED, };
-	struct ibv_send_wr *bad_wr;
-
-	return ibv_post_send(ctx->qp, &wr, &bad_wr);
-}
-
-int pp_get_port_info(struct ibv_context *context, int port,
-		struct ibv_port_attr *attr) {
-	return ibv_query_port(context, port, attr);
 }
 
 void wire_gid_to_gid(const char *wgid, union ibv_gid *gid) {
@@ -902,3 +851,21 @@ void *get_in_addr(struct sockaddr *sa) {
 
 	return &(((struct sockaddr_in6*) sa)->sin6_addr);
 }
+
+/*
+void client_replication_handler(void) {
+	int run = true;
+	while (run)
+	{
+		// read from addr A to addr B
+		// move to copying function
+		// the copying function returns addr C (A <= C <= B)
+		// put A = C
+	}
+}
+
+// TODO: should be in somewhere else
+void *do_store_replication(void) {
+	return NULL;
+}
+*/

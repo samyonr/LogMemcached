@@ -6171,10 +6171,10 @@ int main (int argc, char **argv) {
     }
 
     if (settings.backup_server) {
-    	rdma_init(false, NULL);
+    	rdma_init(false, NULL, NULL);
     } else if (settings.backup_client) {
     	 // current state of the implementation does not support being a server and a client
-    	rdma_init(true, settings.backup_client_servername);
+    	rdma_init(true, settings.backup_client_servername, NULL);
     }
 
     if (pid_file != NULL) {

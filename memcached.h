@@ -395,7 +395,7 @@ extern struct settings settings;
 #define ITEM_SLABBED 4
 
 /* Item was fetched at least once in its lifetime */
-#define ITEM_FETCHED 8
+#define ITEM_STORED 8
 /* Item that pads the end of the buffer  */
 #define ITEM_CYCLE 16
 /* Item is during writing process */
@@ -620,6 +620,7 @@ enum delta_result_type do_add_delta(conn *c, const char *key,
                                     const int64_t delta, char *buf,
                                     uint64_t *cas, const uint32_t hv);
 enum store_item_type do_store_item(item_metadata *item, int comm, conn* c, const uint32_t hv);
+uint32_t do_store_replication(void *buf, uint32_t size, uint32_t replication_offset);
 conn *conn_new(const int sfd, const enum conn_states init_state, const int event_flags, const int read_buffer_size, enum network_transport transport, struct event_base *base);
 void conn_worker_readd(conn *c);
 extern int daemonize(int nochdir, int noclose);

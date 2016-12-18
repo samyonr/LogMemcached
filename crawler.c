@@ -171,74 +171,9 @@ static void crawler_expired_finalize(crawler_module_t *cm) {
  * main thread's values too much. Should rethink again.
  */
 static void crawler_expired_eval(crawler_module_t *cm, item_metadata *search, uint32_t hv, int i) {
-    int slab_id = CLEAR_LRU(i);
-    struct crawler_expired_data *d = (struct crawler_expired_data *) cm->data;
-    pthread_mutex_lock(&d->lock);
-    crawlerstats_t *s = &d->crawlerstats[slab_id];
-    int is_flushed = item_is_flushed(search);
-    if ((search->item->exptime != 0 && search->item->exptime < current_time)
-        || is_flushed) {
-        crawlers[i].reclaimed++;
-        s->reclaimed++;
-
-        if (settings.verbose > 1) {
-            int ii;
-            char *key = ITEM_key(search->item);
-            fprintf(stderr, "LRU crawler found an expired item (flags: %d, slab: %d): ",
-                search->it_flags, search->slabs_clsid);
-            for (ii = 0; ii < search->item->nkey; ++ii) {
-                fprintf(stderr, "%c", key[ii]);
-            }
-            fprintf(stderr, "\n");
-        }
-        if ((search->it_flags & ITEM_FETCHED) == 0 && !is_flushed) {
-            crawlers[i].unfetched++;
-        }
-        do_item_unlink_nolock(search, hv);
-        do_item_remove(search);
-        assert(search->slabs_clsid == 0);
-    } else {
-        s->seen++;
-        refcount_decr(&search->refcount);
-        if (search->item->exptime == 0) {
-            s->noexp++;
-        } else if (search->item->exptime - current_time > 3599) {
-            s->ttl_hourplus++;
-        } else {
-            rel_time_t ttl_remain = search->item->exptime - current_time;
-            int bucket = ttl_remain / 60;
-            s->histo[bucket]++;
-        }
-    }
-    pthread_mutex_unlock(&d->lock);
 }
 
 static void crawler_metadump_eval(crawler_module_t *cm, item_metadata *it, uint32_t hv, int i) {
-    //int slab_id = CLEAR_LRU(i);
-    char keybuf[KEY_MAX_LENGTH * 3 + 1];
-    int is_flushed = item_is_flushed(it);
-    /* Ignore expired content. */
-    if ((it->item->exptime != 0 && it->item->exptime < current_time)
-        || is_flushed) {
-        refcount_decr(&it->refcount);
-        return;
-    }
-    // TODO: uriencode directly into the buffer.
-    uriencode(ITEM_key(it->item), keybuf, it->item->nkey, KEY_MAX_LENGTH * 3 + 1);
-    int total = snprintf(cm->c.cbuf, 4096,
-            "key=%s exp=%ld la=%llu cas=%llu fetch=%s\n",
-            keybuf,
-            (it->item->exptime == 0) ? -1 : (long)it->item->exptime + process_started,
-            (unsigned long long)it->time + process_started,
-            (unsigned long long)ITEM_get_cas(it->item),
-            (it->it_flags & ITEM_FETCHED) ? "yes" : "no");
-    refcount_decr(&it->refcount);
-    // TODO: some way of tracking the errors. these are very unlikely though.
-    if (total >= LRU_CRAWLER_WRITEBUF - 1 || total <= 0) {
-        /* Failed to write, don't push it. */
-        return;
-    }
-    bipbuf_push(cm->c.buf, total);
 }
 
 static int lru_crawler_poll(crawler_client_t *c) {

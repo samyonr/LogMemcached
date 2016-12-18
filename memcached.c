@@ -2442,6 +2442,18 @@ static void _store_item_copy_data(int comm, item_metadata *old_it, item_metadata
     }
 }
 
+uint32_t do_store_replication(void *buf, uint32_t size, uint32_t replication_offset) {
+	for (int i = 0; i < size; i++) {
+		if (i % 20 == 0) {
+			printf("\n%d ", i);
+		}
+		printf("%c",((char *)buf)[i]);
+	}
+	printf("\n");
+	return 0;
+}
+
+
 /*
  * Stores an item in the cache according to the semantics of one of the set
  * commands. In threaded mode, this is protected by the cache lock.
@@ -2551,6 +2563,7 @@ enum store_item_type do_store_item(item_metadata *it, int comm, conn *c, const u
     if (stored == STORED) {
         c->cas = ITEM_get_cas(it->item);
         it->item->it_data_flags &= ~ITEM_DIRTY;
+        it->item->it_data_flags &= ITEM_STORED;
     }
     LOGGER_LOG(c->thread->l, LOG_MUTATIONS, LOGGER_ITEM_STORE, NULL,
             stored, comm, ITEM_key(it->item), it->item->nkey);

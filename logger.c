@@ -183,7 +183,7 @@ static int _logger_thread_parse_ee(logentry *e, char *scratch) {
     total = snprintf(scratch, LOGGER_PARSE_SCRATCH,
             "ts=%d.%d gid=%llu type=eviction key=%s fetch=%s ttl=%lld la=%d\n",
             (int)e->tv.tv_sec, (int)e->tv.tv_usec, (unsigned long long) e->gid,
-            keybuf, (le->it_flags & ITEM_FETCHED) ? "yes" : "no",
+            keybuf, (le->it_flags & ITEM_STORED) ? "yes" : "no",
             (long long int)le->exptime, le->latime);
 
     return total;

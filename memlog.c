@@ -176,6 +176,10 @@ unsigned int get_memory_free_from_beginning() {
 	return mem_free_from_beginning;
 }
 
+void *get_memory_base() {
+	return mem_base;
+}
+
 static unsigned int memlog_free_item() {
 	item_data *it = NULL;
 	unsigned int ntotal = 0;

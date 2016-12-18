@@ -793,7 +793,6 @@ item_metadata *do_item_get(const char *key, const size_t nkey, const uint32_t hv
             }
             was_found = 3;
         } else {
-            it->it_flags |= ITEM_FETCHED;
             DEBUG_REFCNT(it, '+');
         }
     }

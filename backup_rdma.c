@@ -61,7 +61,8 @@
 #define BACKLOG 10 // how many pending connections queue will hold
 #define IBV_PORT 1 // hard coded for now
 #define BACKUP_IP_PORT "18515" // hard coded for now
-
+//#define REPLICATION_CHUNK (1024 * 1024) // 1MB
+#define REPLICATION_CHUNK (1024) // 1MB
 enum {
 	PINGPONG_RECV_WRID = 1, PINGPONG_SEND_WRID = 2,
 };
@@ -99,7 +100,6 @@ struct backup_meta {
 	struct ip_addr ip_dest;
 	enum ibv_mtu mtu;
 	int rx_depth;
-	int num_cq_events;
 	int sl;
 	int sgid_index;
 	char gid[33];
@@ -108,7 +108,6 @@ struct backup_meta {
 struct backup_meta g_backup_meta = {
 		.mtu = IBV_MTU_1024,
 		.rx_depth = 500,
-		.num_cq_events = 0,
 		.sl = 0,
 		.sgid_index = -1
 };
@@ -120,6 +119,7 @@ int backup_server(struct ip_addr addr_data);
 void *backup_server_thread(void *arg);
 void *backup_client_thread(void *arg);
 void *backup_server_connection_handler(void *socket_desc);
+void backup_client_replication_handler(struct backup_ibv_dest *rem_dest);
 
 /* Handels SIGCHLD Signal */
 void sigchld_handler(int s);
@@ -165,10 +165,20 @@ int rdma_init(int is_client, char *server_name, char *ibv_device_name) {
 		}
 	}
 
-	g_backup_meta.ctx = init_ctx(g_backup_meta.ibv_device, 2*4096, //TODO: fix size
+	/*
+	if (is_client) {
+		g_backup_meta.ctx = init_ctx(g_backup_meta.ibv_device, REPLICATION_CHUNK,
+				g_backup_meta.rx_depth, IBV_PORT, !g_backup_meta.ip_dest.ip);
+	} else {
+		g_backup_meta.ctx = init_ctx(g_backup_meta.ibv_device, get_memory_limit(),
+				g_backup_meta.rx_depth, IBV_PORT, !g_backup_meta.ip_dest.ip);
+	}*/
+	g_backup_meta.ctx = init_ctx(g_backup_meta.ibv_device, REPLICATION_CHUNK,
 			g_backup_meta.rx_depth, IBV_PORT, !g_backup_meta.ip_dest.ip);
-	if (!g_backup_meta.ctx)
+
+	if (!g_backup_meta.ctx) {
 		return false;
+	}
 
 	if (ibv_query_port(g_backup_meta.ctx->context, IBV_PORT, &g_backup_meta.ctx->portinfo)) {
 		fprintf(stderr, "Couldn't get port info\n");
@@ -237,8 +247,6 @@ void *backup_client_thread(void *arg) {
 	char msg2[128];
 	struct backup_ibv_dest *rem_dest = NULL;
 	char gid[33];
-	int run = false;;
-
 
 	// create TCP connection
 	memset(&hints, 0, sizeof hints);
@@ -336,71 +344,7 @@ void *backup_client_thread(void *arg) {
 		return NULL;
 	}
 
-	//int ne,i;
-
-	int i = 0;
-	run = true;;
-	while (run)
-	{
-		run = false;
-		struct ibv_sge list = {
-				.addr = (uintptr_t) g_backup_meta.ctx->buf,
-				.length = g_backup_meta.ctx->size/2,
-				.lkey = g_backup_meta.ctx->mr->lkey
-		};
-		struct ibv_send_wr wr = {
-				.wr_id = 0,
-				.sg_list = &list,
-				.num_sge = 1,
-				.opcode = IBV_WR_RDMA_READ,
-				.send_flags = 0,
-				.wr.rdma.remote_addr = rem_dest->remote_address + 4096,
-				.wr.rdma.rkey        = rem_dest->remote_key
-		};
-		struct ibv_send_wr *bad_wr;
-		//struct ibv_wc wc[1];
-		i++;
-		int res = ibv_post_send(g_backup_meta.ctx->qp, &wr, &bad_wr);
-		printf("res is %d\n", res);
-		/*
-		do {
-
-			ne = ibv_poll_cq(g_backup_meta.ctx->cq, 1, wc);
-			if (ne < 0) {
-				fprintf(stderr, "poll CQ failed %d\n", ne);
-				return NULL;
-			}
-
-		}  while (ne < 1);
-		for (i = 0; i < ne; ++i) {
-			if (wc[i].status != IBV_WC_SUCCESS) {
-				fprintf(stderr, "Failed status %s (%d) for wr_id %d\n",
-					ibv_wc_status_str(wc[i].status),
-					wc[i].status, (int) wc[i].wr_id);
-				return NULL;
-			} else {
-				char *tbuf = (char *) g_backup_meta.ctx->buf;
-				printf("b[0] %c", ((char *) g_backup_meta.ctx->buf)[0]);
-				printf("b[1] %c", ((char *) g_backup_meta.ctx->buf)[1]);
-				printf("b[2] %c", ((char *) g_backup_meta.ctx->buf)[2]);
-				printf("b[3] %c\n", tbuf[3]);
-			}
-		}
-		*/
-		usleep(20000);
-		for (int k = 0; k < g_backup_meta.ctx->size / 2; k++) {
-			if(k % 20 == 0) {
-				printf("\n%d ",k);
-			}
-			printf("%c", ((char *) g_backup_meta.ctx->buf)[k]);
-		}
-		printf("\n");
-
-		if (i == 9000) {
-			run = false;
-		}
-	}
-	ibv_ack_cq_events(g_backup_meta.ctx->cq, g_backup_meta.num_cq_events); // TODO: check if needed and when
+	backup_client_replication_handler(rem_dest);
 
 	if (close_ctx(g_backup_meta.ctx))
 		return NULL;
@@ -601,21 +545,15 @@ void *backup_server_connection_handler(void *socket_desc) {
 			rem_dest->lid, rem_dest->qpn, rem_dest->psn, gid);
 
 	int let = 65;
-	for (int k = 0; k < g_backup_meta.ctx->size; k++)
-	{
-		((char *) g_backup_meta.ctx->buf)[k] = let;
+	while(1) {
 		let++;
-		if (let > 90)
-		{
+		if (let > 90) {
 			let = 65;
 		}
+		for (int i = 0; i < g_backup_meta.ctx->size; i++) {
+			((char *)(g_backup_meta.ctx->buf))[i] = let;
+		}
 	}
-
-	for (int i = 0; i < 1000; i++) {
-		usleep(20000);
-	}
-
-	ibv_ack_cq_events(g_backup_meta.ctx->cq, g_backup_meta.num_cq_events);
 
 	if (close_ctx(g_backup_meta.ctx))
 		return NULL;
@@ -636,6 +574,20 @@ struct backup_ibv_context *init_ctx(struct ibv_device *ibv_device, int size,
 
 	ctx->size = size;
 	ctx->rx_depth = rx_depth;
+
+	/*
+	if (is_server) {
+		ctx->buf = get_memory_base();
+	} else {
+		ctx->buf = malloc(roundup(size, g_page_size));
+		if (!ctx->buf) {
+			fprintf(stderr, "Couldn't allocate work buf.\n");
+			return NULL;
+		}
+
+		memset(ctx->buf, '\0', size);
+	}
+	*/
 
 	ctx->buf = malloc(roundup(size, g_page_size));
 	if (!ctx->buf) {
@@ -682,7 +634,8 @@ struct backup_ibv_context *init_ctx(struct ibv_device *ibv_device, int size,
 						.max_send_sge = 1,
 						.max_recv_sge = 1
 				},
-				.qp_type = IBV_QPT_RC
+				.qp_type = IBV_QPT_RC,
+				.sq_sig_all = 1
 		};
 
 		ctx->qp = ibv_create_qp(ctx->pd, &attr);
@@ -852,20 +805,68 @@ void *get_in_addr(struct sockaddr *sa) {
 	return &(((struct sockaddr_in6*) sa)->sin6_addr);
 }
 
-/*
-void client_replication_handler(void) {
+
+void backup_client_replication_handler(struct backup_ibv_dest *rem_dest) {
 	int run = true;
+	//TODO: stop running if connection is close
+	//TODO: stop running if someone from outside called for stop running
+	uint32_t replication_offset = 0;
+	int term = 0;
 	while (run)
 	{
-		// read from addr A to addr B
-		// move to copying function
-		// the copying function returns addr C (A <= C <= B)
-		// put A = C
+		printf("%d\n", term);
+		term++;
+		memset(g_backup_meta.ctx->buf, '\0', g_backup_meta.ctx->size);
+
+		uint32_t size_to_replicate;
+		if (REPLICATION_CHUNK < g_backup_meta.ctx->size - replication_offset) {
+			size_to_replicate = REPLICATION_CHUNK;
+		} else {
+			size_to_replicate = g_backup_meta.ctx->size - replication_offset;
+		}
+
+		struct ibv_sge list = {
+				.addr = (uintptr_t) g_backup_meta.ctx->buf,
+				.length = size_to_replicate,
+				.lkey = g_backup_meta.ctx->mr->lkey
+		};
+
+		struct ibv_send_wr wr = {
+				.wr_id = 0,
+				.sg_list = &list,
+				.num_sge = 1,
+				.opcode = IBV_WR_RDMA_READ,
+				.send_flags = 0,
+				.wr.rdma.remote_addr = rem_dest->remote_address + replication_offset,
+				.wr.rdma.rkey        = rem_dest->remote_key
+		};
+		struct ibv_send_wr *bad_wr;
+
+		int res = ibv_post_send(g_backup_meta.ctx->qp, &wr, &bad_wr);
+		printf("res is %d\n", res);
+		if (res != 0) {
+			exit(1);
+		}
+
+		int ne = 0;
+		do {
+			struct ibv_wc wc;
+			ne = ibv_poll_cq(g_backup_meta.ctx->cq, 1, &wc);
+			if (ne < 0) {
+					fprintf(stderr, "Failed to poll completions from the CQ: ret = %d\n",
+							ne);
+					exit(1);
+			}
+			/* there may be an extra event with no completion in the CQ */
+			if (ne == 0)
+					continue;
+
+			if (wc.status != IBV_WC_SUCCESS) {
+					fprintf(stderr, "Completion with status 0x%x was found\n", wc.status);
+					exit(1);
+			}
+		} while (ne);
+
+		replication_offset = do_store_replication(g_backup_meta.ctx->buf, size_to_replicate, replication_offset);
 	}
 }
-
-// TODO: should be in somewhere else
-void *do_store_replication(void) {
-	return NULL;
-}
-*/

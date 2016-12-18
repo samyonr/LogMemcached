@@ -12,5 +12,6 @@ unsigned int memlog_clean(void);
 unsigned int get_memory_limit(void);
 unsigned int get_memory_available(void);
 unsigned int get_memory_free_from_beginning(void);
+void *get_memory_base(void);
 
 #endif /* MEMLOG_H_ */

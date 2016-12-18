@@ -24,7 +24,7 @@ int  do_item_link(item_metadata *it, const uint32_t hv);     /** may fail if tra
 void do_item_unlink(item_metadata *it, const uint32_t hv);
 void do_item_unlink_nolock(item_metadata *it, const uint32_t hv);
 void do_item_remove(item_metadata *it);
-void do_item_update(item_metadata *it);   /** update LRU time to current and reposition */
+enum store_item_type do_item_update(item_metadata *it);  /** update LRU time to current and reposition */
 void do_item_update_nolock(item_metadata *it);
 int  do_item_replace(item_metadata *it, item_metadata *new_it, const uint32_t hv);
 
@@ -51,7 +51,7 @@ bool item_stats_sizes_status(void);
 
 item_metadata *do_item_get(const char *key, const size_t nkey, const uint32_t hv, conn *c);
 item_metadata *do_item_touch(const char *key, const size_t nkey, uint32_t exptime, const uint32_t hv, conn *c);
-item_metadata *do_item_get_update(item_metadata *old_it, const uint32_t hv);
+item_metadata *do_item_get_update(item_metadata *old_it, const uint32_t hv, enum store_item_type *stored_state);
 void item_stats_reset(void);
 extern pthread_mutex_t lru_locks[POWER_LARGEST];
 

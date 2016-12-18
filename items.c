@@ -455,8 +455,9 @@ void do_item_update_nolock(item_metadata *it) {
 }
 
 /* Bump the last accessed time, or relink if we're in compat mode */
-void do_item_update(item_metadata *it) {
+enum store_item_type do_item_update(item_metadata *it) {
     MEMCACHED_ITEM_UPDATE(ITEM_key(it), it->nkey, it->nbytes);
+    enum store_item_type stored_state = NOT_STORED;
     if (it->time < current_time - ITEM_UPDATE_INTERVAL) {
         assert((it->it_flags & ITEM_SLABBED) == 0);
 
@@ -464,7 +465,7 @@ void do_item_update(item_metadata *it) {
             it->time = current_time;
             if (settings.lru_log_enabled) {
             	if (it->get_count >= settings.lru_log_get_count) {
-					if ((it = item_get_update(it)) != NULL) {
+					if ((it = item_get_update(it, &stored_state)) != NULL) {
 						it->get_count = 0;
 					}
             	} else {
@@ -477,6 +478,7 @@ void do_item_update(item_metadata *it) {
             }
         }
     }
+    return stored_state;
 }
 
 int do_item_replace(item_metadata *it, item_metadata *new_it, const uint32_t hv) {
@@ -810,8 +812,8 @@ item_metadata *do_item_touch(const char *key, size_t nkey, uint32_t exptime,
 	item_metadata *it = NULL;
 	item_metadata *new_it = NULL;
 	item_metadata *old_it = do_item_get(key, nkey, hv, c);
+	enum store_item_type stored = NOT_STORED;
     if (old_it != NULL) {
-    	enum store_item_type stored = NOT_STORED;
     	int failed_alloc = 0;
 		/* we have old_it here - alloc memory to hold new_it */
 		/* flags was already lost - so recover them from ITEM_suffix(it) */
@@ -845,14 +847,17 @@ item_metadata *do_item_touch(const char *key, size_t nkey, uint32_t exptime,
     if (new_it != NULL)
         do_item_remove(new_it);
 
+    if (stored == STORED) {
+    	it->item->it_data_flags |= ITEM_STORED;
+    }
     return it;
 }
 
-item_metadata *do_item_get_update(item_metadata *old_it, const uint32_t hv) {
+item_metadata *do_item_get_update(item_metadata *old_it, const uint32_t hv, enum store_item_type *stored_state) {
 	item_metadata *it = NULL;
 	item_metadata *new_it = NULL;
+	enum store_item_type stored = NOT_STORED;
     if (old_it != NULL) {
-    	enum store_item_type stored = NOT_STORED;
     	int failed_alloc = 0;
 		/* we have old_it here - alloc memory to hold new_it */
 		/* flags was already lost - so recover them from ITEM_suffix(it) */
@@ -885,6 +890,7 @@ item_metadata *do_item_get_update(item_metadata *old_it, const uint32_t hv) {
     if (new_it != NULL)
         do_item_remove(new_it);
 
+    *stored_state = stored;
     return it;
 }
 

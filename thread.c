@@ -613,20 +613,21 @@ void item_unlink(item_metadata *item) {
 /*
  * Moves an item to the back of the LRU queue.
  */
-void item_update(item_metadata *item) {
+enum store_item_type item_update(item_metadata *item) {
     uint32_t hv;
     hv = hash(ITEM_key(item->item), item->item->nkey);
 
     item_lock(hv);
-    do_item_update(item);
+    enum store_item_type stored = do_item_update(item);
     item_unlock(hv);
+    return stored;
 }
 
-item_metadata *item_get_update(item_metadata *item) {
+item_metadata *item_get_update(item_metadata *item, enum store_item_type *stored_state) {
 	item_metadata *it;
 	uint32_t hv;
 	hv = hash(ITEM_key(item->item), item->item->nkey);
-    it = do_item_get_update(item, hv);
+    it = do_item_get_update(item, hv, stored_state);
     return it;
 }
 /*

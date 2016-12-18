@@ -2470,7 +2470,7 @@ enum store_item_type do_store_item(item_metadata *it, int comm, conn *c, const u
 
     if (old_it != NULL && comm == NREAD_ADD) {
         /* add only adds a nonexistent item, but promote to head of LRU */
-        do_item_update(old_it);
+    	stored = do_item_update(old_it);
     } else if (!old_it && (comm == NREAD_REPLACE
         || comm == NREAD_APPEND || comm == NREAD_PREPEND))
     {
@@ -2563,7 +2563,7 @@ enum store_item_type do_store_item(item_metadata *it, int comm, conn *c, const u
     if (stored == STORED) {
         c->cas = ITEM_get_cas(it->item);
         it->item->it_data_flags &= ~ITEM_DIRTY;
-        it->item->it_data_flags &= ITEM_STORED;
+        it->item->it_data_flags |= ITEM_STORED;
     }
     LOGGER_LOG(c->thread->l, LOG_MUTATIONS, LOGGER_ITEM_STORE, NULL,
             stored, comm, ITEM_key(it->item), it->item->nkey);
@@ -3183,7 +3183,10 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens,
                 c->thread->stats.slab_stats[ITEM_clsid(it)].get_hits++;
                 c->thread->stats.get_cmds++;
                 pthread_mutex_unlock(&c->thread->stats.mutex);
-                item_update(it);
+                enum store_item_type stored = item_update(it);
+                if (stored == STORED) {
+                	it->item->it_data_flags |= ITEM_STORED;
+                }
                 *(c->ilist + i) = it;
                 i++;
 
@@ -3497,6 +3500,7 @@ enum delta_result_type do_add_delta(conn *c, const char *key, const size_t nkey,
         // Overwrite the older item's CAS with our new CAS since we're
         // returning the CAS of the old item below.
         ITEM_set_cas(it->item, (settings.use_cas) ? ITEM_get_cas(new_it->item) : 0);
+        new_it->item->it_data_flags |= ITEM_STORED;
         do_item_remove(new_it);       /* release our reference */
     } else {
         /* Should never get here. This means we somehow fetched an unlinked
@@ -3557,10 +3561,11 @@ static void process_delete_command(conn *c, token_t *tokens, const size_t ntoken
         pthread_mutex_unlock(&c->thread->stats.mutex);
 
         bool succeed = false;
-        do_item_alloc(key, nkey, ITEM_DELETED, 0, 0, &succeed);
+        item_metadata *del_it = do_item_alloc(key, nkey, ITEM_DELETED, 0, 0, &succeed);
         if (!succeed) {
             out_of_memory(c, "SERVER_ERROR Out of memory allocating new item");
         } else {
+        	del_it->item->it_data_flags |= ITEM_STORED;
 			item_unlink(it);
 			item_remove(it);      /* release our reference */
 			out_string(c, "DELETED");

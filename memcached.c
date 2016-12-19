@@ -1022,6 +1022,8 @@ static void complete_nread_ascii(conn *c) {
 
     if (!is_valid) {
 		it->item->it_data_flags |= ITEM_CORRUPTED;
+		it->item->it_data_flags &= ~ITEM_DIRTY;
+		it->item->it_data_flags |= ITEM_STORED;
         out_string(c, "CLIENT_ERROR bad data chunk");
 
     } else {
@@ -1426,7 +1428,8 @@ static void process_bin_get_or_touch(conn *c) {
         uint16_t keylen = 0;
         uint32_t bodylen = sizeof(rsp->message.body) + (it->item->nbytes - 2);
 
-        item_update(it);
+        enum store_item_type stored = NOT_STORED;
+        item_update(it, &stored);
         pthread_mutex_lock(&c->thread->stats.mutex);
         if (should_touch) {
             c->thread->stats.touch_cmds++;
@@ -2443,14 +2446,111 @@ static void _store_item_copy_data(int comm, item_metadata *old_it, item_metadata
 }
 
 uint32_t do_store_replication(void *buf, uint32_t size, uint32_t replication_offset) {
-	for (int i = 0; i < size; i++) {
-		if (i % 20 == 0) {
-			printf("\n%d ", i);
+	uint32_t remaining_size = size;
+	uint32_t offset = replication_offset;
+
+	// buf is memlog buffer. anything in memlog is some kind of item
+	while (remaining_size >= 35) { //35 is min item's size
+		item_data *it = (item_data *)(((char *)buf) + offset);
+		// pay attention that pulling without cleaning first will cause problems
+		// but maintenance thread should clean fast enough
+		if ((it->it_data_flags & ITEM_STORED) &&
+				!(it->it_data_flags & ITEM_DIRTY) &&
+				!(it->it_data_flags & ITEM_CYCLE)) {
+			uint ntotal = ITEM_ntotal(it);
+			if (ntotal > remaining_size) {
+				// not enough copied for an item
+				STATS_LOCK();
+				stats.mem_current = ((char *)get_memory_current() - (char *)get_memory_base());
+				STATS_UNLOCK();
+
+				return offset;
+			}
+
+			if (it->it_data_flags & ITEM_CORRUPTED) {
+				remaining_size -= ntotal;
+				offset += ntotal;
+
+				set_memory_available(get_memory_available() - ntotal);
+				set_memory_current(((char *)get_memory_current()) + ntotal);
+
+				STATS_LOCK();
+				stats.mem_current = ((char *)get_memory_current() - (char *)get_memory_base());
+				STATS_UNLOCK();
+
+			} else if (it->it_data_flags & ITEM_DELETED) {
+				uint32_t hv = hash(ITEM_key(it), it->nkey);
+				item_metadata *it_del = assoc_find(ITEM_key(it), it->nkey, hv);
+			    if (it_del) {
+					item_unlink(it_del);
+					item_remove(it_del);
+			    }
+				remaining_size -= ntotal;
+				offset += ntotal;
+
+				set_memory_current(((char *)get_memory_current()) + ntotal);
+				set_memory_available(get_memory_available() - ntotal);
+
+				STATS_LOCK();
+				stats.mem_current = ((char *)get_memory_current() - (char *)get_memory_base());
+				STATS_UNLOCK();
+
+			} else { // just a normal store
+				item_metadata *it_meta = freelist_alloc();
+				assert(it_meta != NULL);
+				it_meta->item = it;
+				it_meta->next_free = it_meta->prev_free = 0;
+				it_meta->slabs_clsid = 1;
+				it_meta->it_flags |= settings.use_cas ? ITEM_CAS : 0;
+				it_meta->h_next = 0;
+
+				printf("%c\n",ITEM_key(it)[0]);
+				uint32_t hv = hash(ITEM_key(it), it->nkey);
+				item_metadata *old_it = assoc_find(ITEM_key(it), it->nkey, hv);
+				if (old_it != NULL) {
+					item_replace(old_it, it_meta, hv);
+				} else {
+					do_item_link(it_meta, hv);
+				}
+
+				set_memory_current(((char *)get_memory_current()) + ntotal);
+				set_memory_available(get_memory_available() - ntotal);
+
+				STATS_LOCK();
+				stats.mem_current = ((char *)get_memory_current() - (char *)get_memory_base());
+				STATS_UNLOCK();
+
+				remaining_size -= ntotal;
+				offset += ntotal;
+			}
+		} else if ((it->it_data_flags & ITEM_STORED) &&
+				!(it->it_data_flags & ITEM_DIRTY) &&
+				(it->it_data_flags & ITEM_CYCLE)) {
+			remaining_size = 0;
+			offset = 0; // start over
+
+			set_memory_current(get_memory_base());
+			set_memory_available(get_memory_free_from_beginning());
+			set_memory_free_from_beginning(0);
+
+			STATS_LOCK();
+			stats.mem_current = ((char *)get_memory_current() - (char *)get_memory_base());
+			STATS_UNLOCK();
+
+			return offset;
+		} else { // ITEM_DIRTY or even not defined yet
+			STATS_LOCK();
+			stats.mem_current = ((char *)get_memory_current() - (char *)get_memory_base());
+			STATS_UNLOCK();
+
+			return offset;
 		}
-		printf("%c",((char *)buf)[i]);
 	}
-	printf("\n");
-	return 0;
+	STATS_LOCK();
+	stats.mem_current = ((char *)get_memory_current() - (char *)get_memory_base());
+	STATS_UNLOCK();
+
+	return offset;
 }
 
 
@@ -2470,7 +2570,7 @@ enum store_item_type do_store_item(item_metadata *it, int comm, conn *c, const u
 
     if (old_it != NULL && comm == NREAD_ADD) {
         /* add only adds a nonexistent item, but promote to head of LRU */
-    	stored = do_item_update(old_it);
+    	new_it = do_item_update(old_it, &stored);
     } else if (!old_it && (comm == NREAD_REPLACE
         || comm == NREAD_APPEND || comm == NREAD_PREPEND))
     {
@@ -3183,11 +3283,15 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens,
                 c->thread->stats.slab_stats[ITEM_clsid(it)].get_hits++;
                 c->thread->stats.get_cmds++;
                 pthread_mutex_unlock(&c->thread->stats.mutex);
-                enum store_item_type stored = item_update(it);
-                if (stored == STORED) {
-                	it->item->it_data_flags |= ITEM_STORED;
+                enum store_item_type stored = NOT_STORED;
+                item_metadata *new_it = item_update(it, &stored);
+                if (new_it != NULL && stored == STORED) {
+                	new_it->item->it_data_flags &= ~ITEM_DIRTY;
+                	new_it->item->it_data_flags |= ITEM_STORED;
+                	*(c->ilist + i) = new_it;
+                } else {
+                	*(c->ilist + i) = it;
                 }
-                *(c->ilist + i) = it;
                 i++;
 
             } else {
@@ -3500,6 +3604,7 @@ enum delta_result_type do_add_delta(conn *c, const char *key, const size_t nkey,
         // Overwrite the older item's CAS with our new CAS since we're
         // returning the CAS of the old item below.
         ITEM_set_cas(it->item, (settings.use_cas) ? ITEM_get_cas(new_it->item) : 0);
+        new_it->item->it_data_flags &= ~ITEM_DIRTY;
         new_it->item->it_data_flags |= ITEM_STORED;
         do_item_remove(new_it);       /* release our reference */
     } else {
@@ -3561,11 +3666,10 @@ static void process_delete_command(conn *c, token_t *tokens, const size_t ntoken
         pthread_mutex_unlock(&c->thread->stats.mutex);
 
         bool succeed = false;
-        item_metadata *del_it = do_item_alloc(key, nkey, ITEM_DELETED, 0, 0, &succeed);
+        do_item_alloc(key, nkey, ITEM_DELETED, 0, 0, &succeed);
         if (!succeed) {
             out_of_memory(c, "SERVER_ERROR Out of memory allocating new item");
         } else {
-        	del_it->item->it_data_flags |= ITEM_STORED;
 			item_unlink(it);
 			item_remove(it);      /* release our reference */
 			out_string(c, "DELETED");

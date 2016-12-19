@@ -265,6 +265,8 @@ item_metadata *do_item_alloc(char *key, const size_t nkey, const unsigned int fl
 			if (succeed != NULL) {
 				*succeed = true;
 			}
+			it_data->it_data_flags &= ~ITEM_DIRTY;
+			it_data->it_data_flags |= ITEM_STORED;
 			return NULL;
         } else { // it_data allocated and it's not a delete item
 			it = freelist_alloc();
@@ -455,9 +457,9 @@ void do_item_update_nolock(item_metadata *it) {
 }
 
 /* Bump the last accessed time, or relink if we're in compat mode */
-enum store_item_type do_item_update(item_metadata *it) {
+item_metadata *do_item_update(item_metadata *it, enum store_item_type *stored_state) {
     MEMCACHED_ITEM_UPDATE(ITEM_key(it), it->nkey, it->nbytes);
-    enum store_item_type stored_state = NOT_STORED;
+    item_metadata *new_it = NULL;
     if (it->time < current_time - ITEM_UPDATE_INTERVAL) {
         assert((it->it_flags & ITEM_SLABBED) == 0);
 
@@ -465,20 +467,16 @@ enum store_item_type do_item_update(item_metadata *it) {
             it->time = current_time;
             if (settings.lru_log_enabled) {
             	if (it->get_count >= settings.lru_log_get_count) {
-					if ((it = item_get_update(it, &stored_state)) != NULL) {
-						it->get_count = 0;
+					if ((new_it = item_get_update(it, stored_state)) != NULL) {
+						new_it->get_count = 0;
 					}
             	} else {
             		it->get_count++;
             	}
             }
-            if (!settings.lru_maintainer_thread) {
-                item_unlink_q(it);
-                item_link_q(it);
-            }
         }
     }
-    return stored_state;
+    return new_it;
 }
 
 int do_item_replace(item_metadata *it, item_metadata *new_it, const uint32_t hv) {
@@ -735,26 +733,6 @@ item_metadata *do_item_get(const char *key, const size_t nkey, const uint32_t hv
 	item_metadata *it = assoc_find(key, nkey, hv);
     if (it != NULL) {
         refcount_incr(&it->refcount);
-        /* Optimization for slab reassignment. prevents popular items from
-         * jamming in busy wait. Can only do this here to satisfy lock order
-         * of item_lock, slabs_lock. */
-        /* This was made unsafe by removal of the cache_lock:
-         * slab_rebalance_signal and slab_rebal.* are modified in a separate
-         * thread under slabs_lock. If slab_rebalance_signal = 1, slab_start =
-         * NULL (0), but slab_end is still equal to some value, this would end
-         * up unlinking every item fetched.
-         * This is either an acceptable loss, or if slab_rebalance_signal is
-         * true, slab_start/slab_end should be put behind the slabs_lock.
-         * Which would cause a huge potential slowdown.
-         * Could also use a specific lock for slab_rebal.* and
-         * slab_rebalance_signal (shorter lock?)
-         */
-        /*if (slab_rebalance_signal &&
-            ((void *)it >= slab_rebal.slab_start && (void *)it < slab_rebal.slab_end)) {
-            do_item_unlink(it, hv);
-            do_item_remove(it);
-            it = NULL;
-        }*/
     }
     int was_found = 0;
 
@@ -848,6 +826,7 @@ item_metadata *do_item_touch(const char *key, size_t nkey, uint32_t exptime,
         do_item_remove(new_it);
 
     if (stored == STORED) {
+    	it->item->it_data_flags &= ~ITEM_DIRTY;
     	it->item->it_data_flags |= ITEM_STORED;
     }
     return it;

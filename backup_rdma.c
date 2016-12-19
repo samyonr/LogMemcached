@@ -62,7 +62,7 @@
 #define IBV_PORT 1 // hard coded for now
 #define BACKUP_IP_PORT "18515" // hard coded for now
 //#define REPLICATION_CHUNK (1024 * 1024) // 1MB
-#define REPLICATION_CHUNK (1024) // 1MB
+#define REPLICATION_CHUNK (128)
 enum {
 	PINGPONG_RECV_WRID = 1, PINGPONG_SEND_WRID = 2,
 };
@@ -165,15 +165,7 @@ int rdma_init(int is_client, char *server_name, char *ibv_device_name) {
 		}
 	}
 
-	/*
-	if (is_client) {
-		g_backup_meta.ctx = init_ctx(g_backup_meta.ibv_device, REPLICATION_CHUNK,
-				g_backup_meta.rx_depth, IBV_PORT, !g_backup_meta.ip_dest.ip);
-	} else {
-		g_backup_meta.ctx = init_ctx(g_backup_meta.ibv_device, get_memory_limit(),
-				g_backup_meta.rx_depth, IBV_PORT, !g_backup_meta.ip_dest.ip);
-	}*/
-	g_backup_meta.ctx = init_ctx(g_backup_meta.ibv_device, REPLICATION_CHUNK,
+	g_backup_meta.ctx = init_ctx(g_backup_meta.ibv_device, get_memory_limit(),
 			g_backup_meta.rx_depth, IBV_PORT, !g_backup_meta.ip_dest.ip);
 
 	if (!g_backup_meta.ctx) {
@@ -324,6 +316,7 @@ void *backup_client_thread(void *arg) {
 	}
 
 	sscanf(msg2, "RDMA addr %lx rkey %x", &rem_dest->remote_address, &rem_dest->remote_key);
+	printf("RDMA addr %lx rkey %x\n",rem_dest->remote_address,rem_dest->remote_key);
 	rem_dest->remote_key = ntohl(rem_dest->remote_key);
 	rem_dest->remote_address = ntohll(rem_dest->remote_address);
 	printf("RDMA addr %lx rkey %x\n",rem_dest->remote_address,rem_dest->remote_key);
@@ -544,16 +537,7 @@ void *backup_server_connection_handler(void *socket_desc) {
 	printf("  remote address: LID 0x%04x, QPN 0x%06x, PSN 0x%06x, GID %s\n",
 			rem_dest->lid, rem_dest->qpn, rem_dest->psn, gid);
 
-	int let = 65;
-	while(1) {
-		let++;
-		if (let > 90) {
-			let = 65;
-		}
-		for (int i = 0; i < g_backup_meta.ctx->size; i++) {
-			((char *)(g_backup_meta.ctx->buf))[i] = let;
-		}
-	}
+	while(1);
 
 	if (close_ctx(g_backup_meta.ctx))
 		return NULL;
@@ -575,27 +559,7 @@ struct backup_ibv_context *init_ctx(struct ibv_device *ibv_device, int size,
 	ctx->size = size;
 	ctx->rx_depth = rx_depth;
 
-	/*
-	if (is_server) {
-		ctx->buf = get_memory_base();
-	} else {
-		ctx->buf = malloc(roundup(size, g_page_size));
-		if (!ctx->buf) {
-			fprintf(stderr, "Couldn't allocate work buf.\n");
-			return NULL;
-		}
-
-		memset(ctx->buf, '\0', size);
-	}
-	*/
-
-	ctx->buf = malloc(roundup(size, g_page_size));
-	if (!ctx->buf) {
-		fprintf(stderr, "Couldn't allocate work buf.\n");
-		return NULL;
-	}
-
-	memset(ctx->buf, 'm', size);
+	ctx->buf = get_memory_base();
 
 	ctx->context = ibv_open_device(ibv_device);
 	if (!ctx->context) {
@@ -811,13 +775,10 @@ void backup_client_replication_handler(struct backup_ibv_dest *rem_dest) {
 	//TODO: stop running if connection is close
 	//TODO: stop running if someone from outside called for stop running
 	uint32_t replication_offset = 0;
-	int term = 0;
+	unsigned long long term = 0;
 	while (run)
 	{
-		printf("%d\n", term);
 		term++;
-		memset(g_backup_meta.ctx->buf, '\0', g_backup_meta.ctx->size);
-
 		uint32_t size_to_replicate;
 		if (REPLICATION_CHUNK < g_backup_meta.ctx->size - replication_offset) {
 			size_to_replicate = REPLICATION_CHUNK;
@@ -826,10 +787,13 @@ void backup_client_replication_handler(struct backup_ibv_dest *rem_dest) {
 		}
 
 		struct ibv_sge list = {
-				.addr = (uintptr_t) g_backup_meta.ctx->buf,
+				.addr = (uintptr_t) ((char *)g_backup_meta.ctx->buf + replication_offset),
 				.length = size_to_replicate,
 				.lkey = g_backup_meta.ctx->mr->lkey
 		};
+
+		//TODO: print all buf, to see where it changes
+		printf("addr: %lu, replication_offset: %u, buf: %lu\n",list.addr, replication_offset, (uintptr_t) ((char *)g_backup_meta.ctx->buf));
 
 		struct ibv_send_wr wr = {
 				.wr_id = 0,
@@ -843,8 +807,8 @@ void backup_client_replication_handler(struct backup_ibv_dest *rem_dest) {
 		struct ibv_send_wr *bad_wr;
 
 		int res = ibv_post_send(g_backup_meta.ctx->qp, &wr, &bad_wr);
-		printf("res is %d\n", res);
 		if (res != 0) {
+			printf ("%llu res is %d\n",term, res);
 			exit(1);
 		}
 
@@ -868,5 +832,6 @@ void backup_client_replication_handler(struct backup_ibv_dest *rem_dest) {
 		} while (ne);
 
 		replication_offset = do_store_replication(g_backup_meta.ctx->buf, size_to_replicate, replication_offset);
+		usleep(1000); //TODO: synchronization with HW
 	}
 }

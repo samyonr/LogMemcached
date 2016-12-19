@@ -41,6 +41,7 @@ void memlog_init(void) {
 
 	/* Allocate everything in a big chunk with malloc */
 	mem_base = malloc(mem_limit);
+	memset(mem_base, 0, mem_limit);
 	if (mem_base != NULL) {
 		mem_current = mem_base;
 		mem_avail = mem_limit;
@@ -72,6 +73,7 @@ static void *memory_allocate(size_t size) {
 	if (((char *)mem_current - (char *)mem_base) + size > mem_limit - 35) { // 35 bytes is the minimal item size
 		// allocate memory for cycle item
 		item_data *it_data = (item_data *)mem_current;
+		it_data->it_data_flags |= ITEM_DIRTY;
     	it_data->it_data_flags |= ITEM_CYCLE;
     	it_data->nkey = sizeof(null_char);
     	uint8_t nsuffix;
@@ -101,6 +103,9 @@ static void *memory_allocate(size_t size) {
 	    STATS_LOCK();
 	    stats.mem_current = (char *)mem_current - (char *)mem_base;
 	    STATS_UNLOCK();
+
+	    it_data->it_data_flags &= ~ITEM_DIRTY;
+	    it_data->it_data_flags |= ITEM_STORED;
 	}
 
 	if (size > mem_avail) {
@@ -172,12 +177,28 @@ unsigned int get_memory_available() {
 	return mem_avail;
 }
 
+void set_memory_available(unsigned int new_mem_avail) {
+	mem_avail = new_mem_avail;
+}
+
 unsigned int get_memory_free_from_beginning() {
 	return mem_free_from_beginning;
 }
 
+void set_memory_free_from_beginning(unsigned int new_mem_free_from_beginning) {
+	mem_free_from_beginning = new_mem_free_from_beginning;
+}
+
 void *get_memory_base() {
 	return mem_base;
+}
+
+void *get_memory_current() {
+	return mem_current;
+}
+
+void set_memory_current(void *new_mem_current) {
+	mem_current = new_mem_current;
 }
 
 static unsigned int memlog_free_item() {
@@ -190,8 +211,7 @@ static unsigned int memlog_free_item() {
 	flags = it->it_data_flags;
 
 	if ((flags & ITEM_CORRUPTED) != 0 ||
-			(flags & ITEM_DELETED) != 0 ||
-			(flags & ITEM_CYCLE) != 0) {
+			(flags & ITEM_DELETED) != 0) {
 		memset(mem_current_freeing, 0, ntotal);
 	    if (settings.verbose > 2)
 	        fprintf(stderr, "LRU moved from %u to %u, meta item\n",
@@ -200,9 +220,21 @@ static unsigned int memlog_free_item() {
 		mem_current_freeing = (char *)mem_current_freeing + ntotal;
 
 		return ntotal;
+	} else if ((flags & ITEM_CYCLE) != 0) {
+		ntotal = it->nbytes;
+		memset(mem_current_freeing, 0, ntotal);
+		    if (settings.verbose > 2)
+		        fprintf(stderr, "LRU moved from %u to %u, meta item\n",
+		        		(unsigned int)((char *)mem_current_freeing - (char *)mem_base),
+						(unsigned int)((char *)mem_current_freeing - (char *)mem_base) + ntotal);
+			mem_current_freeing = (char *)mem_current_freeing + ntotal;
+
+			return ntotal;
+
 	}
 
 	uint32_t hv = hash(ITEM_key(it), it->nkey);
+	printf("%c\n",ITEM_key(it)[0]);
     item_lock(hv);
     item_metadata *it_meta = assoc_find(ITEM_key(it), it->nkey, hv);
     if (it_meta != NULL && it_meta->item == it) {

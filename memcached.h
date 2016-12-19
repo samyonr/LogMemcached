@@ -84,8 +84,8 @@
 #define CHUNK_ALIGN_BYTES 8
 /* slab class max is a 6-bit number, -1. */
 #define MAX_NUMBER_OF_SLAB_CLASSES (63 + 1)
-#define MEMLOG_DEFAULT_SIZE (1 * 1024 * 1024 * 1024) // 1GB
-//#define MEMLOG_DEFAULT_SIZE (1 * 256) // 256 Bytes
+//#define MEMLOG_DEFAULT_SIZE (1 * 1024 * 1024 * 1024) // 1GB
+#define MEMLOG_DEFAULT_SIZE (1 * 256) // 256 Bytes
 
 
 /** How long an object can reasonably be assumed to be locked before
@@ -667,7 +667,7 @@ int   item_link(item_metadata *it);
 void  item_remove(item_metadata *it);
 int   item_replace(item_metadata *it, item_metadata *new_it, const uint32_t hv);
 void  item_unlink(item_metadata *it);
-enum store_item_type  item_update(item_metadata *it);
+item_metadata *item_update(item_metadata *it, enum store_item_type *stored);
 
 void item_lock(uint32_t hv);
 void *item_trylock(uint32_t hv);

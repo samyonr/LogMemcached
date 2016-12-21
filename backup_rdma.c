@@ -61,8 +61,7 @@
 #define BACKLOG 10 // how many pending connections queue will hold
 #define IBV_PORT 1 // hard coded for now
 #define BACKUP_IP_PORT "18515" // hard coded for now
-//#define REPLICATION_CHUNK (1024 * 1024) // 1MB
-#define REPLICATION_CHUNK (128)
+#define REPLICATION_CHUNK (1024 * 1024 * 2) // 2MB
 enum {
 	PINGPONG_RECV_WRID = 1, PINGPONG_SEND_WRID = 2,
 };
@@ -786,14 +785,21 @@ void backup_client_replication_handler(struct backup_ibv_dest *rem_dest) {
 			size_to_replicate = g_backup_meta.ctx->size - replication_offset;
 		}
 
+		/*
+		 * FIXME: in case the replicating machine it too slow, a problem can occur here
+		 * it can be easily reproduced with REPLICATION_CHUNK of size 128B, and memlog size of 256B
+		 * by using memlog as the destination buffer (sg_list), we can replicate already cleaned memory
+		 * directly into the memlog, causing the maintenance thread to go crazy, reaching empty space,
+		 * and not knowing the size of next item (it will thing that its size is 17B, but its not a real item)
+		 * The solution for that is to create a separate destination buffer, wit REPLICATION_CHUNK size,
+		 * replicate memory to that buffer, and then copy internally only the real items, without copying empty space.
+		 * In real system, with fast enough replication, that should not occur.
+		 */
 		struct ibv_sge list = {
 				.addr = (uintptr_t) ((char *)g_backup_meta.ctx->buf + replication_offset),
 				.length = size_to_replicate,
 				.lkey = g_backup_meta.ctx->mr->lkey
 		};
-
-		//TODO: print all buf, to see where it changes
-		printf("addr: %lu, replication_offset: %u, buf: %lu\n",list.addr, replication_offset, (uintptr_t) ((char *)g_backup_meta.ctx->buf));
 
 		struct ibv_send_wr wr = {
 				.wr_id = 0,

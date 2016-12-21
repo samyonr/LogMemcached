@@ -2504,7 +2504,6 @@ uint32_t do_store_replication(void *buf, uint32_t size, uint32_t replication_off
 				it_meta->it_flags |= settings.use_cas ? ITEM_CAS : 0;
 				it_meta->h_next = 0;
 
-				printf("%c\n",ITEM_key(it)[0]);
 				uint32_t hv = hash(ITEM_key(it), it->nkey);
 				item_metadata *old_it = assoc_find(ITEM_key(it), it->nkey, hv);
 				if (old_it != NULL) {
@@ -3397,6 +3396,10 @@ static void process_update_command(conn *c, token_t *tokens, const size_t ntoken
         stats_prefix_record_set(key, nkey);
     }
 
+    /*
+     * FIXME: append/prepend allocating unneeded space here. Later on append/prepend will allocate another item to hold
+     * both the new and the old item. The allocated here item will stay "ITEM_DIRTY" forever, crushing the replication process
+     */
     it = item_alloc(key, nkey, flags, realtime(exptime), vlen);
 
     if (it == 0) {

@@ -144,6 +144,10 @@ static void *do_memlog_alloc(const size_t size, uint64_t *total_bytes,
 
 unsigned int memlog_clean() {
 	// do_memlog_clean handles its own locks
+	/*
+	 * FIXME: There is a risk of a race here with do_memlog_alloc.
+	 * Never occurred to me, but if stange things are happening, this is a place to check
+	 */
 	return do_memlog_clean();
 }
 
@@ -234,7 +238,6 @@ static unsigned int memlog_free_item() {
 	}
 
 	uint32_t hv = hash(ITEM_key(it), it->nkey);
-	printf("%c\n",ITEM_key(it)[0]);
     item_lock(hv);
     item_metadata *it_meta = assoc_find(ITEM_key(it), it->nkey, hv);
     if (it_meta != NULL && it_meta->item == it) {

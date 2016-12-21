@@ -84,9 +84,7 @@
 #define CHUNK_ALIGN_BYTES 8
 /* slab class max is a 6-bit number, -1. */
 #define MAX_NUMBER_OF_SLAB_CLASSES (63 + 1)
-//#define MEMLOG_DEFAULT_SIZE (1 * 1024 * 1024 * 1024) // 1GB
-#define MEMLOG_DEFAULT_SIZE (1 * 256) // 256 Bytes
-
+#define MEMLOG_DEFAULT_SIZE (1 * 1024 * 1024 * 1024) // 1GB
 
 /** How long an object can reasonably be assumed to be locked before
     harvesting it on a low memory condition. Default: disabled. */

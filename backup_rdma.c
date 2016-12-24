@@ -55,8 +55,9 @@
 #include <sys/param.h>
 #include <infiniband/verbs.h>
 
-#include "backup_rdma.h"
 #include "memcached.h"
+#include "backup_rdma.h"
+
 
 #define BACKLOG 10 // how many pending connections queue will hold
 #define BACKUP_IP_PORT "18515" // hard coded for now
@@ -68,6 +69,7 @@
 #define RB_ARRAY_SIZE (1024)
 struct timespec *g_rb_item_time;
 unsigned long g_rb_current = 0;
+unsigned long g_rb_item = 0;
 #endif
 
 static int g_page_size;
@@ -147,6 +149,7 @@ int rdma_init(int is_client, char *server_name, char *ibv_device_name, int ibv_p
 	}
 	memset(g_rb_item_time, 0, RB_ARRAY_SIZE);
 	g_rb_current = 0;
+	g_rb_item = 0;
 #endif
 
 	if (ibv_port > 0) {
@@ -234,10 +237,19 @@ int rdma_init(int is_client, char *server_name, char *ibv_device_name, int ibv_p
 }
 
 #ifdef REPLICATION_BENCHMARK
-void rb_write_time(int just_print) {
+void rb_write_time(int just_print, int sparse) {
 	if (!just_print) {
-		clock_gettime(CLOCK_REALTIME, &g_rb_item_time[g_rb_current]);
-		g_rb_current++;
+		if (!sparse) {
+			clock_gettime(CLOCK_REALTIME, &g_rb_item_time[g_rb_current]);
+			g_rb_current++;
+		} else {
+			g_rb_item++;
+			if (g_rb_item % 10000 == 0) {
+				clock_gettime(CLOCK_REALTIME, &g_rb_item_time[g_rb_current]);
+				g_rb_current++;
+				g_rb_item = 0;
+			}
+		}
 		if (g_rb_current >= RB_ARRAY_SIZE) {
 			for (long i = 0; i < RB_ARRAY_SIZE; i++) {
 				printf("%lu rb time: %"PRIdMAX".%03ld seconds since the Epoch\n",
@@ -864,7 +876,7 @@ void backup_client_replication_handler(struct backup_ibv_dest *rem_dest) {
 			if (failed_res_count > 100) {
 
 #ifdef REPLICATION_BENCHMARK
-				rb_write_time(true);
+				rb_write_time(true, true);
 #endif
 
 				exit(1);

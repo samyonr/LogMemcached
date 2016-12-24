@@ -109,7 +109,7 @@ static void *memory_allocate(size_t size) {
 	    it_data->it_data_flags |= ITEM_STORED;
 
 #ifdef REPLICATION_BENCHMARK
-	rb_write_time(false);
+	rb_write_time(false, true);
 #endif
 
 	}

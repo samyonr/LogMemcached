@@ -1028,7 +1028,7 @@ static void complete_nread_ascii(conn *c) {
 		it->item->it_data_flags |= ITEM_STORED;
 
 #ifdef REPLICATION_BENCHMARK
-	rb_write_time(false);
+	rb_write_time(false, true);
 #endif
 
         out_string(c, "CLIENT_ERROR bad data chunk");
@@ -2475,7 +2475,7 @@ uint32_t do_store_replication(void *buf, uint32_t size, uint32_t replication_off
 			}
 
 #ifdef REPLICATION_BENCHMARK
-			rb_write_time(false);
+			rb_write_time(false, true);
 #endif
 			if (it->it_data_flags & ITEM_CORRUPTED) {
 				remaining_size -= ntotal;
@@ -2538,7 +2538,7 @@ uint32_t do_store_replication(void *buf, uint32_t size, uint32_t replication_off
 			remaining_size = 0;
 			offset = 0; // start over
 #ifdef REPLICATION_BENCHMARK
-			rb_write_time(false);
+			rb_write_time(false, true);
 #endif
 			set_memory_current(get_memory_base());
 			set_memory_available(get_memory_free_from_beginning());
@@ -2677,7 +2677,7 @@ enum store_item_type do_store_item(item_metadata *it, int comm, conn *c, const u
         it->item->it_data_flags |= ITEM_STORED;
 
 #ifdef REPLICATION_BENCHMARK
-	rb_write_time(false);
+	rb_write_time(false, true);
 #endif
 
     }
@@ -3308,7 +3308,7 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens,
                 	new_it->item->it_data_flags |= ITEM_STORED;
 
 #ifdef REPLICATION_BENCHMARK
-	rb_write_time(false);
+	rb_write_time(false, true);
 #endif
 
                 	*(c->ilist + i) = new_it;
@@ -3635,7 +3635,7 @@ enum delta_result_type do_add_delta(conn *c, const char *key, const size_t nkey,
         new_it->item->it_data_flags |= ITEM_STORED;
 
 #ifdef REPLICATION_BENCHMARK
-	rb_write_time(false);
+	rb_write_time(false, true);
 #endif
 
         do_item_remove(new_it);       /* release our reference */

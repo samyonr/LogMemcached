@@ -25,6 +25,8 @@
 
 #include "sasl_defs.h"
 
+//#define REPLICATION_BENCHMARK	1
+
 /** Maximum length of a key. */
 #define KEY_MAX_LENGTH 250
 

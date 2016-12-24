@@ -379,6 +379,8 @@ struct settings {
     bool backup_server; /* settings LogMemcached to act as backup server */
     bool backup_client; /* settings LogMemcached to act as backup client */
     char *backup_client_servername; /* settings LogMemcached's backup server address */
+    unsigned int backup_ibv_port; /* settings LogMemcached's backup RDMA port */
+    int backup_sgid_index; /* settings LogMemcached's backup RDMA sgid_index */
 };
 
 extern struct stats stats;

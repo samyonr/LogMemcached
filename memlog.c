@@ -71,6 +71,7 @@ static void *memory_allocate(size_t size) {
 
 	// we are near the physical boundary of the log, lets start from the base
 	if (((char *)mem_current - (char *)mem_base) + size > mem_limit - 35) { // 35 bytes is the minimal item size
+
 		// allocate memory for cycle item
 		item_data *it_data = (item_data *)mem_current;
 		it_data->it_data_flags |= ITEM_DIRTY;
@@ -106,6 +107,11 @@ static void *memory_allocate(size_t size) {
 
 	    it_data->it_data_flags &= ~ITEM_DIRTY;
 	    it_data->it_data_flags |= ITEM_STORED;
+
+#ifdef REPLICATION_BENCHMARK
+	rb_write_time(false);
+#endif
+
 	}
 
 	if (size > mem_avail) {
@@ -121,7 +127,6 @@ static void *memory_allocate(size_t size) {
     STATS_LOCK();
     stats.mem_current = (char *)mem_current - (char *)mem_base;
     STATS_UNLOCK();
-
     return ret;
 }
 

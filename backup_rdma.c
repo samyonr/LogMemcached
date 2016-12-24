@@ -59,12 +59,16 @@
 #include "memcached.h"
 
 #define BACKLOG 10 // how many pending connections queue will hold
-#define IBV_PORT 1 // hard coded for now
 #define BACKUP_IP_PORT "18515" // hard coded for now
 #define REPLICATION_CHUNK (1024 * 1024 * 2) // 2MB
-enum {
-	PINGPONG_RECV_WRID = 1, PINGPONG_SEND_WRID = 2,
-};
+
+
+#ifdef REPLICATION_BENCHMARK
+//#define RB_ARRAY_SIZE (1024 * 1024 * 1024)
+#define RB_ARRAY_SIZE (1024)
+struct timespec *g_rb_item_time;
+unsigned long g_rb_current = 0;
+#endif
 
 static int g_page_size;
 
@@ -102,13 +106,15 @@ struct backup_meta {
 	int sl;
 	int sgid_index;
 	char gid[33];
+	int ibv_port;
 };
 
 struct backup_meta g_backup_meta = {
 		.mtu = IBV_MTU_1024,
 		.rx_depth = 500,
 		.sl = 0,
-		.sgid_index = -1
+		.sgid_index = -1,
+		.ibv_port = -1
 };
 
 static pthread_t g_server_thread;
@@ -131,8 +137,25 @@ int close_ctx(struct backup_ibv_context *ctx);
 void wire_gid_to_gid(const char *wgid, union ibv_gid *gid);
 void gid_to_wire_gid(const union ibv_gid *gid, char wgid[]);
 
-int rdma_init(int is_client, char *server_name, char *ibv_device_name) {
+int rdma_init(int is_client, char *server_name, char *ibv_device_name, int ibv_port, int sgid_index) {
 	srand48(getpid() * time(NULL));
+
+#ifdef REPLICATION_BENCHMARK
+	g_rb_item_time = malloc(RB_ARRAY_SIZE * sizeof(struct timespec));
+	if (g_rb_item_time == NULL) {
+		exit(1);
+	}
+	memset(g_rb_item_time, 0, RB_ARRAY_SIZE);
+	g_rb_current = 0;
+#endif
+
+	if (ibv_port > 0) {
+		g_backup_meta.ibv_port = ibv_port;
+	}
+
+	if (sgid_index > -1) {
+		g_backup_meta.sgid_index = sgid_index;
+	}
 
 	g_backup_meta.ip_dest.ip = server_name;
 	g_backup_meta.ip_dest.port = BACKUP_IP_PORT; // default, not configurable yet
@@ -165,13 +188,13 @@ int rdma_init(int is_client, char *server_name, char *ibv_device_name) {
 	}
 
 	g_backup_meta.ctx = init_ctx(g_backup_meta.ibv_device, get_memory_limit(),
-			g_backup_meta.rx_depth, IBV_PORT, !g_backup_meta.ip_dest.ip);
+			g_backup_meta.rx_depth, g_backup_meta.ibv_port, !g_backup_meta.ip_dest.ip);
 
 	if (!g_backup_meta.ctx) {
 		return false;
 	}
 
-	if (ibv_query_port(g_backup_meta.ctx->context, IBV_PORT, &g_backup_meta.ctx->portinfo)) {
+	if (ibv_query_port(g_backup_meta.ctx->context, g_backup_meta.ibv_port, &g_backup_meta.ctx->portinfo)) {
 		fprintf(stderr, "Couldn't get port info\n");
 		return false;
 	}
@@ -184,7 +207,7 @@ int rdma_init(int is_client, char *server_name, char *ibv_device_name) {
 	}
 
 	if (g_backup_meta.sgid_index >= 0) {
-		if (ibv_query_gid(g_backup_meta.ctx->context, IBV_PORT,
+		if (ibv_query_gid(g_backup_meta.ctx->context, g_backup_meta.ibv_port,
 				g_backup_meta.sgid_index, &g_backup_meta.ibv_dest.gid)) {
 			fprintf(stderr, "Could not get local gid for gid index %d\n",
 					g_backup_meta.sgid_index);
@@ -209,6 +232,28 @@ int rdma_init(int is_client, char *server_name, char *ibv_device_name) {
 
 	return true;
 }
+
+#ifdef REPLICATION_BENCHMARK
+void rb_write_time(int just_print) {
+	if (!just_print) {
+		clock_gettime(CLOCK_REALTIME, &g_rb_item_time[g_rb_current]);
+		g_rb_current++;
+		if (g_rb_current >= RB_ARRAY_SIZE) {
+			for (long i = 0; i < RB_ARRAY_SIZE; i++) {
+				printf("%lu rb time: %"PRIdMAX".%03ld seconds since the Epoch\n",
+					   i, (intmax_t)g_rb_item_time[i].tv_sec, g_rb_item_time[i].tv_nsec);
+			}
+			exit(1);
+		}
+	} else {
+		for (long i = 0; i < g_rb_current; i++) {
+			printf("%lu rb time: %"PRIdMAX".%03ld seconds since the Epoch\n",
+					i, (intmax_t)g_rb_item_time[i].tv_sec, g_rb_item_time[i].tv_nsec);
+		}
+		exit(1);
+	}
+}
+#endif
 
 int backup_client(struct ip_addr addr_data) {
 	int rv;
@@ -330,7 +375,7 @@ void *backup_client_thread(void *arg) {
 			rem_dest->lid, rem_dest->qpn, rem_dest->psn, gid);
 
 	// connect ibv qp
-	if (connect_ctx(g_backup_meta.ctx, IBV_PORT,
+	if (connect_ctx(g_backup_meta.ctx, g_backup_meta.ibv_port,
 			g_backup_meta.ibv_dest.psn, g_backup_meta.mtu, g_backup_meta.sl, rem_dest,
 			g_backup_meta.sgid_index)) {
 		return NULL;
@@ -490,7 +535,7 @@ void *backup_server_connection_handler(void *socket_desc) {
 			gid);
 	wire_gid_to_gid(gid, &rem_dest->gid);
 
-	if (connect_ctx(g_backup_meta.ctx, IBV_PORT,
+	if (connect_ctx(g_backup_meta.ctx, g_backup_meta.ibv_port,
 			g_backup_meta.ibv_dest.psn, g_backup_meta.mtu, g_backup_meta.sl, rem_dest,
 			g_backup_meta.sgid_index)) {
 		fprintf(stderr, "Couldn't connect to remote QP\n");
@@ -812,19 +857,30 @@ void backup_client_replication_handler(struct backup_ibv_dest *rem_dest) {
 		};
 		struct ibv_send_wr *bad_wr;
 
-		int res = ibv_post_send(g_backup_meta.ctx->qp, &wr, &bad_wr);
-		if (res != 0) {
-			printf ("%llu res is %d\n",term, res);
-			exit(1);
-		}
+		int res = 0;
+		int failed_res_count = 0;
+		do {
+			res = ibv_post_send(g_backup_meta.ctx->qp, &wr, &bad_wr);
+			if (failed_res_count > 100) {
 
+#ifdef REPLICATION_BENCHMARK
+				rb_write_time(true);
+#endif
+
+				exit(1);
+			}
+			if (res != 0) {
+				failed_res_count++;
+				//printf ("%llu res is %d\n",term, res);
+				usleep(1000); //synchronization with the HW?
+			}
+		} while (res != 0);
 		int ne = 0;
 		do {
 			struct ibv_wc wc;
 			ne = ibv_poll_cq(g_backup_meta.ctx->cq, 1, &wc);
 			if (ne < 0) {
-					fprintf(stderr, "Failed to poll completions from the CQ: ret = %d\n",
-							ne);
+					fprintf(stderr, "Failed to poll completions from the CQ: ret = %d\n", ne);
 					exit(1);
 			}
 			/* there may be an extra event with no completion in the CQ */
@@ -838,6 +894,6 @@ void backup_client_replication_handler(struct backup_ibv_dest *rem_dest) {
 		} while (ne);
 
 		replication_offset = do_store_replication(g_backup_meta.ctx->buf, size_to_replicate, replication_offset);
-		usleep(1000); //TODO: synchronization with HW
+		usleep(1000); //synchronization with the HW?
 	}
 }

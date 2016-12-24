@@ -250,6 +250,8 @@ static void settings_init(void) {
     settings.backup_server = false;
     settings.backup_client = false;
     settings.backup_client_servername = NULL;
+    settings.backup_ibv_port = 0;
+    settings.backup_sgid_index = -1;
 }
 
 /*
@@ -1024,6 +1026,11 @@ static void complete_nread_ascii(conn *c) {
 		it->item->it_data_flags |= ITEM_CORRUPTED;
 		it->item->it_data_flags &= ~ITEM_DIRTY;
 		it->item->it_data_flags |= ITEM_STORED;
+
+#ifdef REPLICATION_BENCHMARK
+	rb_write_time(false);
+#endif
+
         out_string(c, "CLIENT_ERROR bad data chunk");
 
     } else {
@@ -2467,6 +2474,9 @@ uint32_t do_store_replication(void *buf, uint32_t size, uint32_t replication_off
 				return offset;
 			}
 
+#ifdef REPLICATION_BENCHMARK
+			rb_write_time(false);
+#endif
 			if (it->it_data_flags & ITEM_CORRUPTED) {
 				remaining_size -= ntotal;
 				offset += ntotal;
@@ -2527,7 +2537,9 @@ uint32_t do_store_replication(void *buf, uint32_t size, uint32_t replication_off
 				(it->it_data_flags & ITEM_CYCLE)) {
 			remaining_size = 0;
 			offset = 0; // start over
-
+#ifdef REPLICATION_BENCHMARK
+			rb_write_time(false);
+#endif
 			set_memory_current(get_memory_base());
 			set_memory_available(get_memory_free_from_beginning());
 			set_memory_free_from_beginning(0);
@@ -2663,6 +2675,11 @@ enum store_item_type do_store_item(item_metadata *it, int comm, conn *c, const u
         c->cas = ITEM_get_cas(it->item);
         it->item->it_data_flags &= ~ITEM_DIRTY;
         it->item->it_data_flags |= ITEM_STORED;
+
+#ifdef REPLICATION_BENCHMARK
+	rb_write_time(false);
+#endif
+
     }
     LOGGER_LOG(c->thread->l, LOG_MUTATIONS, LOGGER_ITEM_STORE, NULL,
             stored, comm, ITEM_key(it->item), it->item->nkey);
@@ -2965,6 +2982,8 @@ static void process_stat_settings(ADD_STAT add_stats, void *c) {
     APPEND_STAT("backup_server", "%s", settings.backup_server ? "yes" : "no");
     APPEND_STAT("backup_client", "%s", settings.backup_client ? "yes" : "no");
     APPEND_STAT("backup_client_servername", "%s", settings.backup_client_servername ? settings.backup_client_servername : "NULL");
+    APPEND_STAT("backup_ibv_port", "%u", settings.backup_ibv_port);
+    APPEND_STAT("backup_sgid_index", "%d", settings.backup_sgid_index);
 }
 
 static void conn_to_str(const conn *c, char *buf) {
@@ -3287,6 +3306,11 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens,
                 if (new_it != NULL && stored == STORED) {
                 	new_it->item->it_data_flags &= ~ITEM_DIRTY;
                 	new_it->item->it_data_flags |= ITEM_STORED;
+
+#ifdef REPLICATION_BENCHMARK
+	rb_write_time(false);
+#endif
+
                 	*(c->ilist + i) = new_it;
                 } else {
                 	*(c->ilist + i) = it;
@@ -3609,6 +3633,11 @@ enum delta_result_type do_add_delta(conn *c, const char *key, const size_t nkey,
         ITEM_set_cas(it->item, (settings.use_cas) ? ITEM_get_cas(new_it->item) : 0);
         new_it->item->it_data_flags &= ~ITEM_DIRTY;
         new_it->item->it_data_flags |= ITEM_STORED;
+
+#ifdef REPLICATION_BENCHMARK
+	rb_write_time(false);
+#endif
+
         do_item_remove(new_it);       /* release our reference */
     } else {
         /* Should never get here. This means we somehow fetched an unlinked
@@ -5232,6 +5261,8 @@ static void usage(void) {
     	   "			  - the data to backup clients."
      	   "			  - backup_client: Set the LogMemcached to act as a backup client, replicating\n"
      	   "			  - the data from backup server."
+    	   "			  - backup_ibv_port: Set LogMemcached's backup RDMA port for replication."
+    	   "			  - backup_sgid_index: Set LogMemcached's backup RDMA sgid index for replication."
            );
     return;
 }
@@ -5532,7 +5563,9 @@ int main (int argc, char **argv) {
         MODERN,
 		LRU_LOG_GET_COUNT,
 		BACKUP_SERVER,
-		BACKUP_CLIENT
+		BACKUP_CLIENT,
+		BACKUP_IBV_PORT,
+		BACKUP_SGID_INDEX
     };
     char *const subopts_tokens[] = {
         [MAXCONNS_FAST] = "maxconns_fast",
@@ -5558,6 +5591,8 @@ int main (int argc, char **argv) {
 		[LRU_LOG_GET_COUNT] = "lru_log_get_count",
 		[BACKUP_SERVER] = "backup_server",
 		[BACKUP_CLIENT] = "backup_client",
+		[BACKUP_IBV_PORT] = "backup_ibv_port",
+		[BACKUP_SGID_INDEX] = "backup_sgid_index",
         NULL
     };
 
@@ -6009,6 +6044,21 @@ int main (int argc, char **argv) {
             	settings.backup_client = true;
             	settings.backup_client_servername = strdup(subopts_value);
             	break;
+            case BACKUP_IBV_PORT:
+                if (subopts_value == NULL) {
+                    fprintf(stderr, "Missing backup_client argument\n");
+                    return 1;
+                }
+            	settings.backup_ibv_port = atoi(subopts_value);
+            	break;
+            case BACKUP_SGID_INDEX:
+                if (subopts_value == NULL) {
+                    fprintf(stderr, "Missing backup_client argument\n");
+                    return 1;
+                }
+            	settings.backup_sgid_index = atoi(subopts_value);
+            	break;
+
             default:
                 printf("Illegal suboption \"%s\"\n", subopts_value);
                 return 1;
@@ -6296,10 +6346,10 @@ int main (int argc, char **argv) {
     }
 
     if (settings.backup_server) {
-    	rdma_init(false, NULL, NULL);
+    	rdma_init(false, NULL, NULL, settings.backup_ibv_port, settings.backup_sgid_index);
     } else if (settings.backup_client) {
     	 // current state of the implementation does not support being a server and a client
-    	rdma_init(true, settings.backup_client_servername, NULL);
+    	rdma_init(true, settings.backup_client_servername, NULL, settings.backup_ibv_port, settings.backup_sgid_index);
     }
 
     if (pid_file != NULL) {

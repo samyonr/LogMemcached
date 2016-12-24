@@ -266,7 +266,12 @@ item_metadata *do_item_alloc(char *key, const size_t nkey, const unsigned int fl
 				*succeed = true;
 			}
 			it_data->it_data_flags &= ~ITEM_DIRTY;
-			it_data->it_data_flags |= ITEM_STORED;
+			it_data->it_data_flags |= ITEM_STORED
+					;
+#ifdef REPLICATION_BENCHMARK
+	rb_write_time(false);
+#endif
+
 			return NULL;
         } else { // it_data allocated and it's not a delete item
 			it = freelist_alloc();
@@ -828,6 +833,11 @@ item_metadata *do_item_touch(const char *key, size_t nkey, uint32_t exptime,
     if (stored == STORED) {
     	it->item->it_data_flags &= ~ITEM_DIRTY;
     	it->item->it_data_flags |= ITEM_STORED;
+
+#ifdef REPLICATION_BENCHMARK
+	rb_write_time(false);
+#endif
+
     }
     return it;
 }

@@ -246,7 +246,6 @@ static void lru_crawler_class_done(int i) {
     do_item_unlinktail_q((item_metadata *)&crawlers[i]);
     do_item_stats_add_crawl(i, crawlers[i].reclaimed,
             crawlers[i].unfetched, crawlers[i].checked);
-    pthread_mutex_unlock(&lru_locks[i]);
     if (active_crawler_mod.mod->doneclass != NULL)
         active_crawler_mod.mod->doneclass(&active_crawler_mod, i);
 }
@@ -280,7 +279,6 @@ static void *item_crawler_thread(void *arg) {
                     continue;
                 }
             }
-            pthread_mutex_lock(&lru_locks[i]);
             search = do_item_crawl_q((item_metadata *)&crawlers[i]);
             if (search == NULL ||
                 (crawlers[i].remaining && --crawlers[i].remaining < 1)) {
@@ -294,7 +292,6 @@ static void *item_crawler_thread(void *arg) {
              * other callers can incr the refcount
              */
             if ((hold_lock = item_trylock(hv)) == NULL) {
-                pthread_mutex_unlock(&lru_locks[i]);
                 continue;
             }
             /* Now see if the item is refcount locked */
@@ -302,7 +299,6 @@ static void *item_crawler_thread(void *arg) {
                 refcount_decr(&search->refcount);
                 if (hold_lock)
                     item_trylock_unlock(hold_lock);
-                pthread_mutex_unlock(&lru_locks[i]);
                 continue;
             }
 
@@ -311,7 +307,6 @@ static void *item_crawler_thread(void *arg) {
             /* Interface for this could improve: do the free/decr here
              * instead? */
             if (!active_crawler_mod.mod->needs_lock) {
-                pthread_mutex_unlock(&lru_locks[i]);
             }
 
             active_crawler_mod.mod->eval(&active_crawler_mod, search, hv, i);
@@ -319,7 +314,6 @@ static void *item_crawler_thread(void *arg) {
             if (hold_lock)
                 item_trylock_unlock(hold_lock);
             if (active_crawler_mod.mod->needs_lock) {
-                pthread_mutex_unlock(&lru_locks[i]);
             }
 
             if (crawls_persleep-- <= 0 && settings.lru_crawler_sleep) {
@@ -414,7 +408,6 @@ static int do_lru_crawler_start(uint32_t id, uint32_t remaining) {
 
     for (i = 0; i < 3; i++) {
         sid = tocrawl[i];
-        pthread_mutex_lock(&lru_locks[sid]);
         // TODO: Pretty sure this is a needless optimization.
         //if (tails[sid] != NULL) {
             if (settings.verbose > 2)
@@ -434,7 +427,6 @@ static int do_lru_crawler_start(uint32_t id, uint32_t remaining) {
             crawler_count++;
             starts++;
         //}
-        pthread_mutex_unlock(&lru_locks[sid]);
     }
     if (starts) {
         STATS_LOCK();

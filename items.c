@@ -164,9 +164,7 @@ static void do_freelist_free(void *ptr, const size_t size, unsigned int id) {
 void item_stats_reset(void) {
     int i;
     for (i = 0; i < LARGEST_ID; i++) {
-        pthread_mutex_lock(&lru_locks[i]);
         memset(&itemstats[i], 0, sizeof(itemstats_t));
-        pthread_mutex_unlock(&lru_locks[i]);
     }
 }
 
@@ -283,15 +281,11 @@ item_metadata *do_item_alloc(char *key, const size_t nkey, const unsigned int fl
     }
 
     if (i > 0) {
-        pthread_mutex_lock(&lru_locks[id]);
         itemstats[id].direct_reclaims += i;
-        pthread_mutex_unlock(&lru_locks[id]);
     }
 
     if (it_data == NULL) {
-        pthread_mutex_lock(&lru_locks[id]);
         itemstats[id].outofmemory++;
-        pthread_mutex_unlock(&lru_locks[id]);
         if (succeed != NULL) {
         	*succeed = false;
         }
@@ -366,9 +360,7 @@ static void do_item_link_q(item_metadata *it) { /* item is the new head */
 }
 
 static void item_link_q(item_metadata *it) {
-    pthread_mutex_lock(&lru_locks[it->slabs_clsid]);
     do_item_link_q(it);
-    pthread_mutex_unlock(&lru_locks[it->slabs_clsid]);
 }
 
 static void do_item_unlink_q(item_metadata *it) {
@@ -378,9 +370,7 @@ static void do_item_unlink_q(item_metadata *it) {
 }
 
 static void item_unlink_q(item_metadata *it) {
-    pthread_mutex_lock(&lru_locks[it->slabs_clsid]);
     do_item_unlink_q(it);
-    pthread_mutex_unlock(&lru_locks[it->slabs_clsid]);
 }
 
 int do_item_link(item_metadata *it, const uint32_t hv) {
@@ -514,7 +504,6 @@ void item_stats_totals(ADD_STAT add_stats, void *c) {
         int i;
         for (x = 0; x < 4; x++) {
             i = n | lru_type_map[x];
-            pthread_mutex_lock(&lru_locks[i]);
             totals.expired_unfetched += itemstats[i].expired_unfetched;
             totals.evicted_unfetched += itemstats[i].evicted_unfetched;
             totals.evicted += itemstats[i].evicted;
@@ -526,7 +515,6 @@ void item_stats_totals(ADD_STAT add_stats, void *c) {
             totals.moves_to_warm += itemstats[i].moves_to_warm;
             totals.moves_within_lru += itemstats[i].moves_within_lru;
             totals.direct_reclaims += itemstats[i].direct_reclaims;
-            pthread_mutex_unlock(&lru_locks[i]);
         }
     }
     APPEND_STAT("expired_unfetched", "%llu",
@@ -571,7 +559,6 @@ void item_stats(ADD_STAT add_stats, void *c) {
         int klen = 0, vlen = 0;
         for (x = 0; x < 4; x++) {
             i = n | lru_type_map[x];
-            pthread_mutex_lock(&lru_locks[i]);
             totals.evicted += itemstats[i].evicted;
             totals.evicted_nonzero += itemstats[i].evicted_nonzero;
             totals.outofmemory += itemstats[i].outofmemory;
@@ -588,7 +575,6 @@ void item_stats(ADD_STAT add_stats, void *c) {
             totals.direct_reclaims += itemstats[i].direct_reclaims;
             size += sizes[i];
             lru_size_map[x] = sizes[i];
-            pthread_mutex_unlock(&lru_locks[i]);
         }
         if (size == 0)
             continue;

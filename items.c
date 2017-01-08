@@ -252,7 +252,7 @@ item_metadata *do_item_alloc(char *key, const size_t nkey, const unsigned int fl
         it_data = memlog_alloc(ntotal, &total_bytes, 0);
 
         if (it_data == NULL) {
-        	usleep(1);
+        	usleep(1000);
         } else if ((flags & ITEM_DELETED) != 0) {
         	it_data->it_data_flags |= ITEM_DELETED;
         	it_data->nkey = nkey;

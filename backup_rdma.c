@@ -254,6 +254,10 @@ void rb_write_time(int just_print, int sparse) {
 			for (long i = 0; i < RB_ARRAY_SIZE; i++) {
 				printf("%lu rb time: %"PRIdMAX".%03ld seconds since the Epoch\n",
 					   i, (intmax_t)g_rb_item_time[i].tv_sec, g_rb_item_time[i].tv_nsec);
+				if (i > 0) {
+					printf("diff with prev time: %"PRIdMAX".%9ld seconds since the Epoch\n",
+							(intmax_t)g_rb_item_time[i].tv_sec-(intmax_t)g_rb_item_time[i-1].tv_sec, g_rb_item_time[i].tv_nsec-g_rb_item_time[i-1].tv_nsec);
+				}
 			}
 			exit(1);
 		}
@@ -261,9 +265,21 @@ void rb_write_time(int just_print, int sparse) {
 		for (long i = 0; i < g_rb_current; i++) {
 			printf("%lu rb time: %"PRIdMAX".%03ld seconds since the Epoch\n",
 					i, (intmax_t)g_rb_item_time[i].tv_sec, g_rb_item_time[i].tv_nsec);
+			if (i > 0) {
+				printf("diff with prev time: %"PRIdMAX".%9ld seconds since the Epoch\n",
+						(intmax_t)g_rb_item_time[i].tv_sec-(intmax_t)g_rb_item_time[i-1].tv_sec, g_rb_item_time[i].tv_nsec-g_rb_item_time[i-1].tv_nsec);
+			}
 		}
 		exit(1);
 	}
+}
+
+unsigned long int get_current_seconds(void) {
+	return g_rb_item_time[g_rb_current-1].tv_sec;
+}
+
+unsigned long int get_current_useconds(void) {
+	return g_rb_item_time[g_rb_current-1].tv_nsec;
 }
 #endif
 

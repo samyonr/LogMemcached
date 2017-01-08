@@ -893,37 +893,20 @@ static int lru_maintainer_free() {
 
 static pthread_t lru_maintainer_tid;
 
-#define MAX_LRU_MAINTAINER_SLEEP 1000000
 #define MIN_LRU_MAINTAINER_SLEEP 1000
 
 static void *lru_maintainer_thread(void *arg) {
     useconds_t to_sleep = MIN_LRU_MAINTAINER_SLEEP;
-    rel_time_t last_crawler_check = 0;
 
     pthread_mutex_lock(&lru_maintainer_lock);
     if (settings.verbose > 2)
         fprintf(stderr, "Starting LRU maintainer background thread\n");
     while (do_run_lru_maintainer_thread) {
-        int did_moves = 0;
         pthread_mutex_unlock(&lru_maintainer_lock);
         usleep(to_sleep);
         pthread_mutex_lock(&lru_maintainer_lock);
+        lru_maintainer_free();
 
-        /* Once per second at most */
-        if (last_crawler_check != current_time) {
-        	did_moves = lru_maintainer_free();
-
-            last_crawler_check = current_time;
-        }
-
-        if (did_moves == 0) {
-            if (to_sleep < MAX_LRU_MAINTAINER_SLEEP)
-                to_sleep += 1000;
-        } else {
-            to_sleep /= 2;
-            if (to_sleep < MIN_LRU_MAINTAINER_SLEEP)
-                to_sleep = MIN_LRU_MAINTAINER_SLEEP;
-        }
 
     }
     pthread_mutex_unlock(&lru_maintainer_lock);

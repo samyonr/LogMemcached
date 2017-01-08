@@ -77,8 +77,7 @@ static void *memory_allocate(size_t size) {
 		it_data->it_data_flags |= ITEM_DIRTY;
     	it_data->it_data_flags |= ITEM_CYCLE;
     	it_data->nkey = sizeof(null_char);
-    	uint8_t nsuffix;
-    	char suffix[40];
+
         char snum[10]; // more than enough for 1MB sized items
         int num =  sprintf(snum, "%d", (int)(mem_avail - sizeof(item_data) - (sizeof(null_char) + 1) - 4));
     	it_data->nbytes = mem_avail - num /* size of "%d" */ /
@@ -86,16 +85,6 @@ static void *memory_allocate(size_t size) {
 							- (sizeof(null_char) + 1) /* nkey + 1 */ /
 							- 4 /* the size of " 16 " where 16 = ITEM_CYCLE */ /
 							- 2 /* size of "/r/n" */;
-		memcpy(ITEM_key(it_data), &null_char, sizeof(null_char));
-	    item_make_header(sizeof(null_char) + 1, ITEM_CYCLE,
-	    		mem_avail - num /* size of "%d" */
-				- sizeof(item_data)
-				- (sizeof(null_char) + 1) /* nkey + 1 */
-				- 4 /* the size of " 16 " where 16 = ITEM_CYCLE */
-				- 2 /* size of "/r/n" */,
-				suffix, &nsuffix);
-		memcpy(ITEM_suffix(it_data), suffix, (size_t)nsuffix);
-		it_data->nsuffix = nsuffix;
 
 		mem_current = mem_base;
 		mem_avail = mem_free_from_beginning;
@@ -109,9 +98,10 @@ static void *memory_allocate(size_t size) {
 	    it_data->it_data_flags |= ITEM_STORED;
 
 #ifdef REPLICATION_BENCHMARK
-	rb_write_time(false, true);
+	    rb_write_time(false, true);
+	    printf("CYCLE rb time: %"PRIdMAX".%03ld seconds since the Epoch\n",
+	    					   (intmax_t)get_current_seconds(), get_current_useconds());
 #endif
-
 	}
 
 	if (size > mem_avail) {
@@ -140,7 +130,7 @@ static void *do_memlog_alloc(const size_t size, uint64_t *total_bytes,
 		return NULL;
 	}
 
-	memset(ptr, 0, (size_t)size);
+	// memset(ptr, 0, (size_t)size); // no need, maintainer thread cleans already
 	*total_bytes = size;
 
 	ret = (void *)ptr;
@@ -151,14 +141,15 @@ unsigned int memlog_clean() {
 	// do_memlog_clean handles its own locks
 	/*
 	 * FIXME: There is a risk of a race here with do_memlog_alloc.
-	 * Never occurred to me, but if stange things are happening, this is a place to check
+	 * Never occurred to me, but if strange things are happening, this is a place to check
 	 */
 	return do_memlog_clean();
 }
 
 static unsigned int do_memlog_clean() {
 	unsigned int freed = 0;
-	pthread_mutex_lock(&memlog_lock);
+	// no need for lock, if no free memory available, alloc will fail
+	//pthread_mutex_lock(&memlog_lock);
 	freed = memlog_free_chunk();
 	if (freed > 0) {
 		if ((char *)mem_current <= (char *)mem_current_freeing) {
@@ -173,7 +164,7 @@ static unsigned int do_memlog_clean() {
 		}
 
 	}
-	pthread_mutex_unlock(&memlog_lock);
+	//pthread_mutex_unlock(&memlog_lock);
 
 	return freed;
 }

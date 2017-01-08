@@ -2927,7 +2927,9 @@ static void server_stats(ADD_STAT add_stats, conn *c) {
     APPEND_STAT("log_watcher_skipped", "%llu", (unsigned long long)stats.log_watcher_skipped);
     APPEND_STAT("log_watcher_sent", "%llu", (unsigned long long)stats.log_watcher_sent);
     APPEND_STAT("mem_current", "%llu", (unsigned long long)stats.mem_current);
-
+    APPEND_STAT("mem_avail", "%llu", (unsigned long long)stats.mem_avail);
+    APPEND_STAT("mem_free_from_beginning", "%llu", (unsigned long long)stats.mem_free_from_beginning);
+    APPEND_STAT("mem_current_freeing", "%llu", (unsigned long long)stats.mem_current_freeing);
     STATS_UNLOCK();
 }
 

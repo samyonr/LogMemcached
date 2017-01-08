@@ -92,6 +92,8 @@ static void *memory_allocate(size_t size) {
 
 	    STATS_LOCK();
 	    stats.mem_current = (char *)mem_current - (char *)mem_base;
+	    stats.mem_avail = mem_avail;
+	    stats.mem_free_from_beginning = mem_free_from_beginning;
 	    STATS_UNLOCK();
 
 	    it_data->it_data_flags &= ~ITEM_DIRTY;
@@ -116,6 +118,8 @@ static void *memory_allocate(size_t size) {
 
     STATS_LOCK();
     stats.mem_current = (char *)mem_current - (char *)mem_base;
+    stats.mem_avail = mem_avail;
+    stats.mem_free_from_beginning = mem_free_from_beginning;
     STATS_UNLOCK();
     return ret;
 }
@@ -148,8 +152,7 @@ unsigned int memlog_clean() {
 
 static unsigned int do_memlog_clean() {
 	unsigned int freed = 0;
-	// no need for lock, if no free memory available, alloc will fail
-	//pthread_mutex_lock(&memlog_lock);
+	pthread_mutex_lock(&memlog_lock);
 	freed = memlog_free_chunk();
 	if (freed > 0) {
 		if ((char *)mem_current <= (char *)mem_current_freeing) {
@@ -163,8 +166,14 @@ static unsigned int do_memlog_clean() {
 			mem_current_freeing = mem_base;
 		}
 
+	    STATS_LOCK();
+	    stats.mem_avail = mem_avail;
+	    stats.mem_free_from_beginning = mem_free_from_beginning;
+	    stats.mem_current_freeing = (char *)mem_current_freeing - (char *)mem_base;;
+	    STATS_UNLOCK();
+
 	}
-	//pthread_mutex_unlock(&memlog_lock);
+	pthread_mutex_unlock(&memlog_lock);
 
 	return freed;
 }

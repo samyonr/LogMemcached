@@ -303,6 +303,9 @@ struct stats {
     uint64_t      log_watcher_skipped; /* logs watchers missed */
     uint64_t      log_watcher_sent; /* logs sent to watcher buffers */
     uint64_t	  mem_current; /* current position in the memory */
+    uint64_t	  mem_avail; /* how much memory available from the current freeing position */
+    uint64_t	  mem_free_from_beginning; /* how much memory available from the beginning */
+    uint64_t	  mem_current_freeing; /* current position in memory to free */
     struct timeval maxconns_entered;  /* last time maxconns entered */
 };
 

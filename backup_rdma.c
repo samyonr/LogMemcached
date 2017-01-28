@@ -66,9 +66,9 @@
 
 #ifdef REPLICATION_BENCHMARK
 //#define RB_ARRAY_SIZE (1024 * 1024 * 1024)
-#define RB_ARRAY_SIZE (1024)
-struct timespec *g_rb_item_time;
-unsigned long g_rb_current = 0;
+#define RB_ITEMS_NUM (25000000)
+//#define RB_ITEMS_NUM (2500)
+static pthread_mutex_t benchmark_lock = PTHREAD_MUTEX_INITIALIZER;
 unsigned long g_rb_item = 0;
 #endif
 
@@ -143,12 +143,6 @@ int rdma_init(int is_client, char *server_name, char *ibv_device_name, int ibv_p
 	srand48(getpid() * time(NULL));
 
 #ifdef REPLICATION_BENCHMARK
-	g_rb_item_time = malloc(RB_ARRAY_SIZE * sizeof(struct timespec));
-	if (g_rb_item_time == NULL) {
-		exit(1);
-	}
-	memset(g_rb_item_time, 0, RB_ARRAY_SIZE);
-	g_rb_current = 0;
 	g_rb_item = 0;
 #endif
 
@@ -237,50 +231,42 @@ int rdma_init(int is_client, char *server_name, char *ibv_device_name, int ibv_p
 }
 
 #ifdef REPLICATION_BENCHMARK
-void rb_write_time(int just_print, int sparse) {
+void rb_write_time(int just_print) {
+	static bool first_time = true;
+	static struct timespec begin_time;
+	static struct timespec end_time;
+    pthread_mutex_lock(&benchmark_lock);
+	if (first_time) {
+		first_time = false;
+		clock_gettime(CLOCK_REALTIME, &begin_time);
+	}
+    pthread_mutex_unlock(&benchmark_lock);
 	if (!just_print) {
-		if (!sparse) {
-			clock_gettime(CLOCK_REALTIME, &g_rb_item_time[g_rb_current]);
-			g_rb_current++;
-		} else {
-			g_rb_item++;
-			if (g_rb_item % 10000 == 0) {
-				clock_gettime(CLOCK_REALTIME, &g_rb_item_time[g_rb_current]);
-				g_rb_current++;
-				g_rb_item = 0;
-			}
-		}
-		if (g_rb_current >= RB_ARRAY_SIZE) {
-			for (long i = 0; i < RB_ARRAY_SIZE; i++) {
-				printf("%lu rb time: %"PRIdMAX".%03ld seconds since the Epoch\n",
-					   i, (intmax_t)g_rb_item_time[i].tv_sec, g_rb_item_time[i].tv_nsec);
-				if (i > 0) {
-					printf("diff with prev time: %"PRIdMAX".%9ld seconds since the Epoch\n",
-							(intmax_t)g_rb_item_time[i].tv_sec-(intmax_t)g_rb_item_time[i-1].tv_sec, g_rb_item_time[i].tv_nsec-g_rb_item_time[i-1].tv_nsec);
-				}
-			}
+		g_rb_item++; //not thread safe, but no need to be
+		if (g_rb_item >= RB_ITEMS_NUM) {
+			pthread_mutex_lock(&benchmark_lock);
+			clock_gettime(CLOCK_REALTIME, &end_time);
+			printf("start time: %"PRIdMAX".%03ld seconds since the Epoch, for %lu items\n",
+								   (intmax_t)begin_time.tv_sec, begin_time.tv_nsec, g_rb_item);
+			printf("start time: %"PRIdMAX".%03ld seconds since the Epoch, for %lu items\n",
+								   (intmax_t)end_time.tv_sec, end_time.tv_nsec, g_rb_item);
+			usleep(10000);
 			exit(1);
+			pthread_mutex_unlock(&benchmark_lock);
 		}
 	} else {
-		for (long i = 0; i < g_rb_current; i++) {
-			printf("%lu rb time: %"PRIdMAX".%03ld seconds since the Epoch\n",
-					i, (intmax_t)g_rb_item_time[i].tv_sec, g_rb_item_time[i].tv_nsec);
-			if (i > 0) {
-				printf("diff with prev time: %"PRIdMAX".%9ld seconds since the Epoch\n",
-						(intmax_t)g_rb_item_time[i].tv_sec-(intmax_t)g_rb_item_time[i-1].tv_sec, g_rb_item_time[i].tv_nsec-g_rb_item_time[i-1].tv_nsec);
-			}
-		}
+		pthread_mutex_lock(&benchmark_lock);
+		clock_gettime(CLOCK_REALTIME, &end_time);
+		printf("start time: %"PRIdMAX".%03ld seconds since the Epoch, for %lu items\n",
+							   (intmax_t)begin_time.tv_sec, begin_time.tv_nsec, g_rb_item);
+		printf("start time: %"PRIdMAX".%03ld seconds since the Epoch, for %lu items\n",
+							   (intmax_t)end_time.tv_sec, end_time.tv_nsec, g_rb_item);
+		usleep(10000);
 		exit(1);
+		pthread_mutex_unlock(&benchmark_lock);
 	}
 }
 
-unsigned long int get_current_seconds(void) {
-	return g_rb_item_time[g_rb_current-1].tv_sec;
-}
-
-unsigned long int get_current_useconds(void) {
-	return g_rb_item_time[g_rb_current-1].tv_nsec;
-}
 #endif
 
 int backup_client(struct ip_addr addr_data) {
@@ -892,7 +878,7 @@ void backup_client_replication_handler(struct backup_ibv_dest *rem_dest) {
 			if (failed_res_count > 100) {
 
 #ifdef REPLICATION_BENCHMARK
-				rb_write_time(true, true);
+				rb_write_time(true);
 #endif
 
 				exit(1);
@@ -917,6 +903,9 @@ void backup_client_replication_handler(struct backup_ibv_dest *rem_dest) {
 
 			if (wc.status != IBV_WC_SUCCESS) {
 					fprintf(stderr, "Completion with status 0x%x was found\n", wc.status);
+#ifdef REPLICATION_BENCHMARK
+					rb_write_time(true);
+#endif
 					exit(1);
 			}
 		} while (ne);

@@ -100,9 +100,9 @@ static void *memory_allocate(size_t size) {
 	    it_data->it_data_flags |= ITEM_STORED;
 
 #ifdef REPLICATION_BENCHMARK
-	    rb_write_time(false, true);
-	    printf("CYCLE rb time: %"PRIdMAX".%03ld seconds since the Epoch\n",
-	    					   (intmax_t)get_current_seconds(), get_current_useconds());
+	    rb_write_time(false);
+	    //printf("CYCLE rb time: %"PRIdMAX".%03ld seconds since the Epoch\n",
+	    //					   (intmax_t)get_current_seconds(), get_current_useconds());
 #endif
 	}
 

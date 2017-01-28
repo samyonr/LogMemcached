@@ -267,7 +267,7 @@ item_metadata *do_item_alloc(char *key, const size_t nkey, const unsigned int fl
 			it_data->it_data_flags |= ITEM_STORED
 					;
 #ifdef REPLICATION_BENCHMARK
-	rb_write_time(false, true);
+	rb_write_time(false);
 #endif
 
 			return NULL;
@@ -821,7 +821,7 @@ item_metadata *do_item_touch(const char *key, size_t nkey, uint32_t exptime,
     	it->item->it_data_flags |= ITEM_STORED;
 
 #ifdef REPLICATION_BENCHMARK
-	rb_write_time(false, true);
+	rb_write_time(false);
 #endif
 
     }

@@ -248,9 +248,9 @@ void rb_write_time(int just_print) {
 			clock_gettime(CLOCK_REALTIME, &end_time);
 			printf("start time: %"PRIdMAX".%03ld seconds since the Epoch, for %lu items\n",
 								   (intmax_t)begin_time.tv_sec, begin_time.tv_nsec, g_rb_item);
-			printf("start time: %"PRIdMAX".%03ld seconds since the Epoch, for %lu items\n",
+			printf("end time: %"PRIdMAX".%03ld seconds since the Epoch, for %lu items\n",
 								   (intmax_t)end_time.tv_sec, end_time.tv_nsec, g_rb_item);
-			usleep(10000);
+			usleep(60000);
 			exit(1);
 			pthread_mutex_unlock(&benchmark_lock);
 		}
@@ -259,9 +259,9 @@ void rb_write_time(int just_print) {
 		clock_gettime(CLOCK_REALTIME, &end_time);
 		printf("start time: %"PRIdMAX".%03ld seconds since the Epoch, for %lu items\n",
 							   (intmax_t)begin_time.tv_sec, begin_time.tv_nsec, g_rb_item);
-		printf("start time: %"PRIdMAX".%03ld seconds since the Epoch, for %lu items\n",
+		printf("end time: %"PRIdMAX".%03ld seconds since the Epoch, for %lu items\n",
 							   (intmax_t)end_time.tv_sec, end_time.tv_nsec, g_rb_item);
-		usleep(10000);
+		usleep(60000);
 		exit(1);
 		pthread_mutex_unlock(&benchmark_lock);
 	}
@@ -910,7 +910,10 @@ void backup_client_replication_handler(struct backup_ibv_dest *rem_dest) {
 			}
 		} while (ne);
 
-		replication_offset = do_store_replication(g_backup_meta.ctx->buf, size_to_replicate, replication_offset);
+		asm volatile("": : :"memory");
+		volatile void *safe_buffer = g_backup_meta.ctx->buf;
+		asm volatile("": : :"memory");
+		replication_offset = do_store_replication((void *)safe_buffer, size_to_replicate, replication_offset);
 		usleep(1000); //synchronization with the HW?
 	}
 }

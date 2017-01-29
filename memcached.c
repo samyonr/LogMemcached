@@ -1023,6 +1023,7 @@ static void complete_nread_ascii(conn *c) {
 	}
 
     if (!is_valid) {
+    	asm volatile("": : :"memory");
 		it->item->it_data_flags |= ITEM_CORRUPTED;
 		it->item->it_data_flags &= ~ITEM_DIRTY;
 		it->item->it_data_flags |= ITEM_STORED;
@@ -1030,7 +1031,6 @@ static void complete_nread_ascii(conn *c) {
 #ifdef REPLICATION_BENCHMARK
 	rb_write_time(false);
 #endif
-
         out_string(c, "CLIENT_ERROR bad data chunk");
 
     } else {
@@ -2455,15 +2455,26 @@ static void _store_item_copy_data(int comm, item_metadata *old_it, item_metadata
 uint32_t do_store_replication(void *buf, uint32_t size, uint32_t replication_offset) {
 	uint32_t remaining_size = size;
 	uint32_t offset = replication_offset;
-
+	uint8_t flags;
+	asm volatile("": : :"memory");
+	volatile void *safe_buf = buf;
 	// buf is memlog buffer. anything in memlog is some kind of item
 	while (remaining_size >= 35) { //35 is min item's size
-		item_data *it = (item_data *)(((char *)buf) + offset);
+		asm volatile("": : :"memory");
+		item_data *it = (item_data *)(((char *)safe_buf) + offset);
+		flags = it->it_data_flags; //FIXME: if you can. safe_buf (and buf) sometimes, every hundreds of thousands of reads is modified
+		// during the run. For example, the next if shows that it->it_data_flags is not ITEM_STORED, but next during
+		// the run, in the last 'else' statement, it->it_data_flags is ITEM_STORED. Therefore, as a patch for now,
+		// i'm copying the flag to the stack.
+		// probably it is caused because the NIC, or some CPU reordering. Not sure.
+
 		// pay attention that pulling without cleaning first will cause problems
 		// but maintenance thread should clean fast enough
-		if ((it->it_data_flags & ITEM_STORED) &&
-				!(it->it_data_flags & ITEM_DIRTY) &&
-				!(it->it_data_flags & ITEM_CYCLE)) {
+
+		if ((flags & ITEM_STORED) &&
+				!(flags & ITEM_DIRTY) &&
+				!(flags & ITEM_CYCLE)) {
+
 			uint ntotal = ITEM_ntotal(it);
 			if (ntotal > remaining_size) {
 				// not enough copied for an item
@@ -2477,7 +2488,7 @@ uint32_t do_store_replication(void *buf, uint32_t size, uint32_t replication_off
 #ifdef REPLICATION_BENCHMARK
 			rb_write_time(false);
 #endif
-			if (it->it_data_flags & ITEM_CORRUPTED) {
+			if (flags & ITEM_CORRUPTED) {
 				remaining_size -= ntotal;
 				offset += ntotal;
 
@@ -2488,7 +2499,7 @@ uint32_t do_store_replication(void *buf, uint32_t size, uint32_t replication_off
 				stats.mem_current = ((char *)get_memory_current() - (char *)get_memory_base());
 				STATS_UNLOCK();
 
-			} else if (it->it_data_flags & ITEM_DELETED) {
+			} else if (flags & ITEM_DELETED) {
 				uint32_t hv = hash(ITEM_key(it), it->nkey);
 				item_metadata *it_del = assoc_find(ITEM_key(it), it->nkey, hv);
 			    if (it_del) {
@@ -2532,9 +2543,10 @@ uint32_t do_store_replication(void *buf, uint32_t size, uint32_t replication_off
 				remaining_size -= ntotal;
 				offset += ntotal;
 			}
-		} else if ((it->it_data_flags & ITEM_STORED) &&
-				!(it->it_data_flags & ITEM_DIRTY) &&
-				(it->it_data_flags & ITEM_CYCLE)) {
+		} else if ((flags & ITEM_STORED) &&
+				!(flags & ITEM_DIRTY) &&
+				(flags & ITEM_CYCLE)) {
+
 			remaining_size = 0;
 			offset = 0; // start over
 #ifdef REPLICATION_BENCHMARK
@@ -2673,6 +2685,7 @@ enum store_item_type do_store_item(item_metadata *it, int comm, conn *c, const u
 
     if (stored == STORED) {
         c->cas = ITEM_get_cas(it->item);
+        asm volatile("": : :"memory");
         it->item->it_data_flags &= ~ITEM_DIRTY;
         it->item->it_data_flags |= ITEM_STORED;
 
@@ -3306,6 +3319,7 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens,
                 enum store_item_type stored = NOT_STORED;
                 item_metadata *new_it = item_update(it, &stored);
                 if (new_it != NULL && stored == STORED) {
+                	asm volatile("": : :"memory");
                 	new_it->item->it_data_flags &= ~ITEM_DIRTY;
                 	new_it->item->it_data_flags |= ITEM_STORED;
 
@@ -3633,6 +3647,7 @@ enum delta_result_type do_add_delta(conn *c, const char *key, const size_t nkey,
         // Overwrite the older item's CAS with our new CAS since we're
         // returning the CAS of the old item below.
         ITEM_set_cas(it->item, (settings.use_cas) ? ITEM_get_cas(new_it->item) : 0);
+        asm volatile("": : :"memory");
         new_it->item->it_data_flags &= ~ITEM_DIRTY;
         new_it->item->it_data_flags |= ITEM_STORED;
 

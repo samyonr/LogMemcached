@@ -263,6 +263,7 @@ item_metadata *do_item_alloc(char *key, const size_t nkey, const unsigned int fl
 			if (succeed != NULL) {
 				*succeed = true;
 			}
+			asm volatile("": : :"memory");
 			it_data->it_data_flags &= ~ITEM_DIRTY;
 			it_data->it_data_flags |= ITEM_STORED
 					;
@@ -817,6 +818,7 @@ item_metadata *do_item_touch(const char *key, size_t nkey, uint32_t exptime,
         do_item_remove(new_it);
 
     if (stored == STORED) {
+    	asm volatile("": : :"memory");
     	it->item->it_data_flags &= ~ITEM_DIRTY;
     	it->item->it_data_flags |= ITEM_STORED;
 

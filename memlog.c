@@ -28,7 +28,7 @@ static unsigned int memlog_free_chunk(void);
 static pthread_mutex_t memlog_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static size_t mem_limit = 0;
-static void *mem_base = NULL;
+static volatile void *mem_base = NULL;
 static void *mem_current = NULL;
 static size_t mem_avail = 0;
 static size_t mem_free_from_beginning = 0;
@@ -41,13 +41,13 @@ void memlog_init(void) {
 
 	/* Allocate everything in a big chunk with malloc */
 	mem_base = malloc(mem_limit);
-	memset(mem_base, 0, mem_limit);
+	memset((void *)mem_base, 0, mem_limit);
 	if (mem_base != NULL) {
-		mem_current = mem_base;
+		mem_current = (void *)mem_base;
 		mem_avail = mem_limit;
 		mem_free_from_beginning = 0;
-		mem_current_freeing = mem_base;
-		mem_current_to_free = mem_base;
+		mem_current_freeing = (void *)mem_base;
+		mem_current_to_free = (void *)mem_base;
 	} else {
 		fprintf(stderr, "Warning: Failed to allocate requested memory in"
 				" one large chunk.\nWill allocate in smaller chunks\n");
@@ -86,7 +86,7 @@ static void *memory_allocate(size_t size) {
 							- 4 /* the size of " 16 " where 16 = ITEM_CYCLE */ /
 							- 2 /* size of "/r/n" */;
 
-		mem_current = mem_base;
+		mem_current = (void *)mem_base;
 		mem_avail = mem_free_from_beginning;
 		mem_free_from_beginning = 0;
 
@@ -96,7 +96,9 @@ static void *memory_allocate(size_t size) {
 	    stats.mem_free_from_beginning = mem_free_from_beginning;
 	    STATS_UNLOCK();
 
+	    asm volatile("": : :"memory");
 	    it_data->it_data_flags &= ~ITEM_DIRTY;
+	    asm volatile("": : :"memory");
 	    it_data->it_data_flags |= ITEM_STORED;
 
 #ifdef REPLICATION_BENCHMARK
@@ -163,7 +165,7 @@ static unsigned int do_memlog_clean() {
 
 		// we reached the buffers border, time to start over
 		if (((char *)mem_current_freeing - (char *)mem_base) >= mem_limit) {
-			mem_current_freeing = mem_base;
+			mem_current_freeing = (void *)mem_base;
 		}
 
 	    STATS_LOCK();
@@ -199,7 +201,7 @@ void set_memory_free_from_beginning(unsigned int new_mem_free_from_beginning) {
 }
 
 void *get_memory_base() {
-	return mem_base;
+	return (void *)mem_base;
 }
 
 void *get_memory_current() {
